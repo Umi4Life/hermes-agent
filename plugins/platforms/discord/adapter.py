@@ -3132,10 +3132,13 @@ class DiscordAdapter(BasePlatformAdapter):
     ) -> None:
         """Common handler for simple slash commands that dispatch a command string.
 
-        Defers the interaction (shows "thinking..."), dispatches the command,
-        then cleans up the deferred response.  If *followup_msg* is provided
-        the "thinking..." indicator is replaced with that text; otherwise it
-        is deleted so the channel isn't cluttered.
+        For commands with an immediate known completion message, send that
+        ephemeral message as the initial interaction response.  Discord
+        reliably exits slash-command composer mode when the initial response
+        is completed directly; the old defer + edit_original_response path
+        could leave the client stuck in slash mode even though the backend
+        command succeeded.  Commands without an immediate completion message
+        keep the deferred-response cleanup path so the channel isn't cluttered.
         """
         # Log the invoker so ghost-command reports can be triaged.  Discord
         # native slash invocations are always user-initiated (no bot can fire
@@ -3160,14 +3163,19 @@ class DiscordAdapter(BasePlatformAdapter):
         if not await self._check_slash_authorization(interaction, command_text):
             return
 
-        await interaction.response.defer(ephemeral=True)
         event = self._build_slash_event(interaction, command_text)
+        if followup_msg:
+            await self.handle_message(event)
+            try:
+                await interaction.response.send_message(followup_msg, ephemeral=True)
+            except Exception as e:
+                logger.debug("Discord interaction response failed: %s", e)
+            return
+
+        await interaction.response.defer(ephemeral=True)
         await self.handle_message(event)
         try:
-            if followup_msg:
-                await interaction.edit_original_response(content=followup_msg)
-            else:
-                await interaction.delete_original_response()
+            await interaction.delete_original_response()
         except Exception as e:
             logger.debug("Discord interaction cleanup failed: %s", e)
 
