@@ -8400,9 +8400,11 @@ def _resolve_chat_argv(
     Appending ``--resume <id>`` to argv doesn't work because ``ui-tui`` does
     not parse its argv.
 
-    ``HERMES_TUI_GATEWAY_URL`` is injected so the PTY child can attach to
-    this process's in-memory ``tui_gateway`` instance instead of spawning
-    its own Python gateway subprocess.
+    By default the PTY child starts its own stable ``tui_gateway`` subprocess.
+    ``HERMES_TUI_GATEWAY_URL`` can be injected to attach to this process's
+    in-memory ``tui_gateway`` instance instead, but that mode is opt-in because
+    the browser-embedded dashboard chat has hit React/Ink render loops in this
+    attach configuration (React error #301 / too many re-renders).
 
     `sidecar_url` (when set) is forwarded as ``HERMES_TUI_SIDECAR_URL`` so
     the spawned ``tui_gateway.entry`` can mirror dispatcher emits to the
@@ -8431,8 +8433,10 @@ def _resolve_chat_argv(
     if sidecar_url:
         env["HERMES_TUI_SIDECAR_URL"] = sidecar_url
 
-    if gateway_ws_url := _build_gateway_ws_url():
-        env["HERMES_TUI_GATEWAY_URL"] = gateway_ws_url
+    attach_gateway = os.getenv("HERMES_DASHBOARD_CHAT_ATTACH_GATEWAY", "0")
+    if attach_gateway.strip().lower() in {"1", "true", "yes", "on"}:
+        if gateway_ws_url := _build_gateway_ws_url():
+            env["HERMES_TUI_GATEWAY_URL"] = gateway_ws_url
 
     return list(argv), str(cwd) if cwd else None, env
 
