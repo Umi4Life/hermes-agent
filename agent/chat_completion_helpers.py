@@ -197,6 +197,19 @@ def interruptible_api_call(agent, api_kwargs: dict):
                 )
             elif agent.api_mode == "anthropic_messages":
                 result["response"] = agent._anthropic_messages_create(api_kwargs)
+            elif agent.api_mode == "cursor_sdk" or agent.provider == "cursor-sdk":
+                from agent.cursor_sdk_adapter import run_cursor_sdk_chat_completion
+
+                result["response"] = run_cursor_sdk_chat_completion(
+                    messages=api_kwargs.get("messages", []),
+                    api_key=getattr(agent, "api_key", "") or api_kwargs.get("api_key", ""),
+                    model_id=api_kwargs.get("cursor_model_id") or agent.model or "composer-2.5",
+                    model_params=api_kwargs.get("cursor_model_params") or {"fast": "false"},
+                    workspace_root=api_kwargs.get("cursor_workspace_root"),
+                    session_id=api_kwargs.get("session_id") or getattr(agent, "session_id", None),
+                    timeout_seconds=api_kwargs.get("cursor_timeout_seconds") or 90.0,
+                    max_retries=api_kwargs.get("cursor_max_retries", 1),
+                )
             elif agent.api_mode == "bedrock_converse":
                 # Bedrock uses boto3 directly — no OpenAI client needed.
                 # normalize_converse_response produces an OpenAI-compatible
@@ -563,6 +576,21 @@ def build_api_kwargs(agent, api_messages: list) -> dict:
             max_tokens=agent.max_tokens or 4096,
             region=region,
             guardrail_config=guardrail,
+        )
+
+    if agent.api_mode == "cursor_sdk" or agent.provider == "cursor-sdk":
+        _cursor_t = agent._get_transport("cursor_sdk")
+        cursor_cfg = getattr(agent, "request_overrides", {}) or {}
+        return _cursor_t.build_kwargs(
+            model=agent.model or "composer-2.5",
+            messages=agent._prepare_messages_for_non_vision_model(api_messages),
+            tools=[],
+            cursor_model_id=cursor_cfg.get("cursor_model_id") or agent.model or "composer-2.5",
+            cursor_model_params=cursor_cfg.get("cursor_model_params") or {"fast": "false"},
+            cursor_workspace_root=cursor_cfg.get("cursor_workspace_root") or os.getenv("HERMES_CURSOR_WORKSPACE_ROOT"),
+            cursor_timeout_seconds=cursor_cfg.get("cursor_timeout_seconds") or _env_float("HERMES_CURSOR_TIMEOUT_SECONDS", 90.0),
+            cursor_max_retries=cursor_cfg.get("cursor_max_retries", 1),
+            session_id=getattr(agent, "session_id", None),
         )
 
     if agent.api_mode == "codex_responses":

@@ -1373,6 +1373,7 @@ def run_conversation(
                 # API upgrade (lines ~1083-1085).
                 elif (
                     agent.provider == "copilot-acp"
+                    or agent.api_mode == "cursor_sdk"
                     or str(agent.base_url or "").lower().startswith("acp://copilot")
                     or str(agent.base_url or "").lower().startswith("acp+tcp://")
                 ):

@@ -105,6 +105,8 @@ dependencies = [
 # Native Anthropic provider — only needed when provider=anthropic (not via
 # OpenRouter or other aggregators).
 anthropic = ["anthropic==0.86.0"]
+# Cursor SDK backend — optional provider=cursor-sdk direct Python integration.
+cursor-sdk = ["cursor-sdk==0.1.7"]
 # Web search backends — each only loaded when the user picks it as their
 # search provider (configured via `hermes tools` or config.yaml).
 exa = ["exa-py==2.10.2"]
