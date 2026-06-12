@@ -27,6 +27,7 @@ import json
 from typing import Any, Dict, List, Optional
 
 from agent.prompt_builder import (
+    AGENT_MODEL_IDENTITY_GUIDANCE,
     DEFAULT_AGENT_IDENTITY,
     GOOGLE_MODEL_OPERATIONAL_GUIDANCE,
     HERMES_AGENT_HELP_GUIDANCE,
@@ -98,6 +99,11 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
     if not _soul_loaded:
         # Fallback to hardcoded identity
         stable_parts.append(DEFAULT_AGENT_IDENTITY)
+
+    # Generic agent-vs-model bridge.  Keep this outside SOUL.md so user
+    # personalities can stay portable across runtimes while Hermes still
+    # steers model families that over-answer with their backend identity.
+    stable_parts.append(AGENT_MODEL_IDENTITY_GUIDANCE)
 
     # Pointer to the hermes-agent skill + docs for user questions about Hermes itself.
     stable_parts.append(HERMES_AGENT_HELP_GUIDANCE)

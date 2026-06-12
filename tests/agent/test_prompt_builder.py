@@ -8,6 +8,7 @@ import sys
 import pytest
 
 from agent.prompt_builder import (
+    AGENT_MODEL_IDENTITY_GUIDANCE,
     _scan_context_content,
     _truncate_content,
     _parse_skill_file,
@@ -47,6 +48,13 @@ class TestGuidanceConstants:
     def test_session_search_guidance_is_simple_cross_session_recall(self):
         assert "relevant cross-session context exists" in SESSION_SEARCH_GUIDANCE
         assert "recent turns of the current session" not in SESSION_SEARCH_GUIDANCE
+
+    def test_agent_model_identity_guidance_separates_identity_from_backend(self):
+        assert "assistant/agent identity" in AGENT_MODEL_IDENTITY_GUIDANCE
+        assert "implementation details" in AGENT_MODEL_IDENTITY_GUIDANCE
+        assert "backend model" in AGENT_MODEL_IDENTITY_GUIDANCE
+        assert "personality or style checks" in AGENT_MODEL_IDENTITY_GUIDANCE
+        assert "Sky Feather" not in AGENT_MODEL_IDENTITY_GUIDANCE
 
 
 # =========================================================================

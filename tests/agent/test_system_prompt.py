@@ -3,6 +3,7 @@
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from agent.prompt_builder import AGENT_MODEL_IDENTITY_GUIDANCE
 from agent.system_prompt import build_system_prompt_parts
 
 
@@ -55,3 +56,31 @@ class TestContextFileCwd:
     def test_configured_dir_when_terminal_cwd_set(self, monkeypatch, tmp_path):
         monkeypatch.setenv("TERMINAL_CWD", str(tmp_path))
         assert _captured_context_cwd(_make_agent()) == tmp_path
+
+
+class TestAgentModelIdentityGuidance:
+    def test_guidance_is_in_stable_prompt_with_soul_identity(self):
+        agent = _make_agent()
+        with (
+            patch("run_agent.load_soul_md", return_value="Custom assistant identity."),
+            patch("run_agent.build_nous_subscription_prompt", return_value=""),
+            patch("run_agent.build_environment_hints", return_value=""),
+            patch("run_agent.build_context_files_prompt", return_value=""),
+        ):
+            parts = build_system_prompt_parts(agent)
+
+        assert "Custom assistant identity." in parts["stable"]
+        assert AGENT_MODEL_IDENTITY_GUIDANCE in parts["stable"]
+        assert parts["stable"].index("Custom assistant identity.") < parts["stable"].index(AGENT_MODEL_IDENTITY_GUIDANCE)
+
+    def test_guidance_is_in_stable_prompt_with_default_identity(self):
+        agent = _make_agent()
+        with (
+            patch("run_agent.load_soul_md", return_value=""),
+            patch("run_agent.build_nous_subscription_prompt", return_value=""),
+            patch("run_agent.build_environment_hints", return_value=""),
+            patch("run_agent.build_context_files_prompt", return_value=""),
+        ):
+            parts = build_system_prompt_parts(agent)
+
+        assert AGENT_MODEL_IDENTITY_GUIDANCE in parts["stable"]
