@@ -1513,6 +1513,27 @@ def resolve_runtime_provider(
             "requested_provider": requested_provider,
         }
 
+    if provider == "cursor-sdk":
+        creds = resolve_api_key_provider_credentials(provider)
+        cursor_model = (target_model or model_cfg.get("default") or "composer-2.5").strip()
+        if not cursor_model or cursor_model == "cursor-sdk":
+            cursor_model = "composer-2.5"
+        return {
+            "provider": "cursor-sdk",
+            "api_mode": "cursor_sdk",
+            "base_url": creds.get("base_url", "cursor-sdk://local").rstrip("/"),
+            "api_key": creds.get("api_key", ""),
+            "source": creds.get("source", "env"),
+            "requested_provider": requested_provider,
+            "request_overrides": {
+                "cursor_model_id": cursor_model,
+                "cursor_model_params": {"fast": "false"},
+                "cursor_workspace_root": os.getenv("HERMES_CURSOR_WORKSPACE_ROOT", "/srv/hermes-cursor/workspaces"),
+                "cursor_timeout_seconds": float(os.getenv("HERMES_CURSOR_TIMEOUT_SECONDS", "90")),
+                "cursor_max_retries": int(os.getenv("HERMES_CURSOR_MAX_RETRIES", "1")),
+            },
+        }
+
     # Anthropic (native Messages API)
     if provider == "anthropic":
         # Allow base URL override from config.yaml model.base_url, but only
