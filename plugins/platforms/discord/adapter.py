@@ -30,6 +30,7 @@ _DISCORD_COMMAND_SYNC_STATE_SUBDIR = "gateway"
 _DISCORD_COMMAND_SYNC_STATE_FILENAME = "discord_command_sync_state.json"
 _DISCORD_COMMAND_SYNC_MUTATION_INTERVAL_SECONDS = 4.5
 _DISCORD_COMMAND_SYNC_MAX_RATE_LIMIT_SLEEP_SECONDS = 30.0
+_DISCORD_MODEL_PICKER_FINAL_EDIT_TIMEOUT_SECONDS = 10.0
 
 try:
     import discord
@@ -5752,14 +5753,38 @@ def _define_discord_view_classes() -> None:
             except Exception as exc:
                 result_text = f"Error switching model: {exc}"
 
-            await interaction.edit_original_response(
-                embed=discord.Embed(
-                    title="⚙ Model Switched",
-                    description=result_text,
-                    color=discord.Color.green(),
-                ),
-                view=None,
+            _Embed = getattr(discord, "Embed")
+            _Color = getattr(discord, "Color")
+            final_embed = _Embed(
+                title="⚙ Model Switched",
+                description=result_text,
+                color=_Color.green(),
             )
+            try:
+                await asyncio.wait_for(
+                    interaction.edit_original_response(
+                        embed=final_embed,
+                        view=None,
+                    ),
+                    timeout=_DISCORD_MODEL_PICKER_FINAL_EDIT_TIMEOUT_SECONDS,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Discord model picker final edit failed; sending follow-up fallback: %s",
+                    exc,
+                )
+                try:
+                    followup = getattr(interaction, "followup", None)
+                    if followup is not None:
+                        await followup.send(
+                            content=result_text,
+                            ephemeral=True,
+                        )
+                except Exception as fallback_exc:
+                    logger.warning(
+                        "Discord model picker follow-up fallback failed: %s",
+                        fallback_exc,
+                    )
 
         async def _on_back(self, interaction: discord.Interaction):
             if not self._check_auth(interaction):

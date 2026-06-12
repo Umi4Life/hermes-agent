@@ -1480,6 +1480,13 @@ def switch_model(agent, new_model, new_provider, api_key='', base_url='', api_mo
             agent._is_anthropic_oauth = _is_oauth_token(effective_key) if (_is_native_anthropic and isinstance(effective_key, str)) else False
             agent.client = None
             agent._client_kwargs = {}
+        elif api_mode == "cursor_sdk":
+            # Cursor SDK is a direct SDK adapter, not an OpenAI-compatible
+            # HTTP endpoint. Keep the runtime fields but leave client creation
+            # to the cursor_sdk transport path.
+            agent.api_key = api_key or agent.api_key
+            agent.client = None
+            agent._client_kwargs = {}
         else:
             effective_key = api_key or agent.api_key
             effective_base = base_url or agent.base_url

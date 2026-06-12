@@ -38,6 +38,19 @@ from utils import base_url_host_matches, base_url_hostname
 
 logger = logging.getLogger(__name__)
 
+_CURSOR_SDK_API_KWARGS = {
+    "cursor_model_id",
+    "cursor_model_params",
+    "cursor_workspace_root",
+    "cursor_timeout_seconds",
+    "cursor_max_retries",
+}
+
+
+def _without_cursor_sdk_kwargs(api_kwargs: dict) -> dict:
+    """Return OpenAI-compatible kwargs with Cursor-SDK-only fields removed."""
+    return {k: v for k, v in api_kwargs.items() if k not in _CURSOR_SDK_API_KWARGS}
+
 
 def _ra():
     """Lazy ``run_agent`` reference.
@@ -234,13 +247,14 @@ def interruptible_api_call(agent, api_kwargs: dict):
                     raise
                 result["response"] = normalize_converse_response(raw_response)
             else:
+                openai_api_kwargs = _without_cursor_sdk_kwargs(api_kwargs)
                 request_client = _set_request_client(
                     agent._create_request_openai_client(
                         reason="chat_completion_request",
-                        api_kwargs=api_kwargs,
+                        api_kwargs=openai_api_kwargs,
                     )
                 )
-                result["response"] = request_client.chat.completions.create(**api_kwargs)
+                result["response"] = request_client.chat.completions.create(**openai_api_kwargs)
         except Exception as e:
             result["error"] = e
         finally:
@@ -1650,6 +1664,23 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
             raise result["error"]
         return result["response"]
 
+    if agent.api_mode == "cursor_sdk" or agent.provider == "cursor-sdk":
+        from agent.cursor_sdk_adapter import run_cursor_sdk_chat_completion
+
+        response = run_cursor_sdk_chat_completion(
+            messages=api_kwargs.get("messages", []),
+            api_key=getattr(agent, "api_key", "") or api_kwargs.get("api_key", ""),
+            model_id=api_kwargs.get("cursor_model_id") or agent.model or "composer-2.5",
+            model_params=api_kwargs.get("cursor_model_params") or {"fast": "false"},
+            workspace_root=api_kwargs.get("cursor_workspace_root"),
+            session_id=api_kwargs.get("session_id") or getattr(agent, "session_id", None),
+            timeout_seconds=api_kwargs.get("cursor_timeout_seconds") or 90.0,
+            max_retries=api_kwargs.get("cursor_max_retries", 1),
+        )
+        if agent._interrupt_requested:
+            raise InterruptedError("Agent interrupted during Cursor SDK API call")
+        return response
+
     result = {"response": None, "error": None, "partial_tool_names": []}
     request_client_holder = {"client": None, "diag": None, "owner_tid": None}
     request_client_lock = threading.Lock()
@@ -1729,8 +1760,9 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
         # Cap connect/pool at 60s even when provider timeout is higher.
         # connect/pool cover TCP handshake, not model inference.
         _conn_cap = min(_base_timeout, 60.0) if _provider_timeout_cfg is not None else 30.0
+        openai_api_kwargs = _without_cursor_sdk_kwargs(api_kwargs)
         stream_kwargs = {
-            **api_kwargs,
+            **openai_api_kwargs,
             "stream": True,
             "stream_options": {"include_usage": True},
             "timeout": _httpx.Timeout(

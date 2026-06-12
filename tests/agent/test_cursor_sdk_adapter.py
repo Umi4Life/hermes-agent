@@ -135,7 +135,7 @@ def test_cursor_sdk_failure_after_retry_returns_structured_error_without_choices
 def test_cursor_sdk_sanitizes_hermes_secrets_from_sdk_process_environment(monkeypatch, tmp_path):
     from agent.cursor_sdk_adapter import run_cursor_sdk_chat_completion
 
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-should-not-leak")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-sho...leak")
     monkeypatch.setenv("HERMES_SECRET_THING", "should-not-leak")
     monkeypatch.setenv("PATH", os.environ.get("PATH", ""))
     calls = _install_fake_cursor_sdk(
@@ -171,3 +171,204 @@ def test_cursor_sdk_runtime_provider_resolves_selectable_non_default(monkeypatch
     assert runtime["api_key"] == "cursor-test-key"
     assert runtime["base_url"] == "cursor-sdk://local"
     assert runtime["requested_provider"] == "cursor-sdk"
+    assert runtime["request_overrides"]["cursor_model_id"] == "composer-2.5"
+    assert runtime["request_overrides"]["cursor_model_params"] == {"fast": "false"}
+
+
+def test_gateway_runtime_kwargs_preserve_cursor_request_overrides(monkeypatch):
+    import gateway.run as gateway_run
+    from hermes_cli import runtime_provider
+
+    expected_overrides = {
+        "cursor_model_id": "composer-2.5",
+        "cursor_model_params": {"fast": "false"},
+        "cursor_timeout_seconds": 90.0,
+        "cursor_max_retries": 1,
+    }
+
+    monkeypatch.setattr(
+        runtime_provider,
+        "resolve_runtime_provider",
+        lambda: {
+            "api_key": "cursor-test-key",
+            "base_url": "cursor-sdk://local",
+            "provider": "cursor-sdk",
+            "api_mode": "cursor_sdk",
+            "request_overrides": expected_overrides,
+        },
+    )
+    monkeypatch.setattr(runtime_provider, "_get_model_config", lambda: {})
+
+    runtime_kwargs = gateway_run._resolve_runtime_agent_kwargs()
+
+    assert runtime_kwargs["provider"] == "cursor-sdk"
+    assert runtime_kwargs["api_mode"] == "cursor_sdk"
+    assert runtime_kwargs["request_overrides"] == expected_overrides
+
+
+def test_gateway_turn_config_merges_cursor_request_overrides_without_fast_mode():
+    from gateway.run import GatewayRunner
+
+    runner = GatewayRunner.__new__(GatewayRunner)
+    runner._service_tier = None
+    runtime_kwargs = {
+        "api_key": "cursor-test-key",
+        "base_url": "cursor-sdk://local",
+        "provider": "cursor-sdk",
+        "api_mode": "cursor_sdk",
+        "request_overrides": {
+            "cursor_model_id": "composer-2.5",
+            "cursor_model_params": {"fast": "false"},
+        },
+    }
+
+    route = runner._resolve_turn_agent_config("Reply exactly pong", "composer-2.5", runtime_kwargs)
+
+    assert route["runtime"]["provider"] == "cursor-sdk"
+    assert route["runtime"]["api_mode"] == "cursor_sdk"
+    assert route["request_overrides"] == {
+        "cursor_model_id": "composer-2.5",
+        "cursor_model_params": {"fast": "false"},
+    }
+
+
+def test_agent_init_admits_cursor_sdk_api_mode_without_downgrading_to_chat(monkeypatch):
+    from run_agent import AIAgent
+
+    monkeypatch.setenv("CURSOR_API_KEY", "cursor-test-key")
+    agent = AIAgent(
+        model="composer-2.5",
+        provider="cursor-sdk",
+        base_url="cursor-sdk://local",
+        api_key="cursor-test-key",
+        api_mode="cursor_sdk",
+        enabled_toolsets=[],
+        skip_context_files=True,
+        skip_memory=True,
+        quiet_mode=True,
+    )
+
+    assert agent.provider == "cursor-sdk"
+    assert agent.api_mode == "cursor_sdk"
+
+
+def test_cursor_sdk_streaming_dispatch_uses_adapter_not_openai_client(monkeypatch, tmp_path):
+    from agent import cursor_sdk_adapter
+    from agent.chat_completion_helpers import interruptible_streaming_api_call
+
+    calls = []
+
+    def fake_cursor_call(**kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(content="pong", tool_calls=None, reasoning_content=None),
+                    finish_reason="stop",
+                )
+            ],
+            model=kwargs["model_id"],
+            cursor_metadata={"status": "finished"},
+        )
+
+    monkeypatch.setattr(cursor_sdk_adapter, "run_cursor_sdk_chat_completion", fake_cursor_call)
+
+    agent = SimpleNamespace(
+        api_mode="cursor_sdk",
+        provider="cursor-sdk",
+        model="composer-2.5",
+        api_key="cursor-test-key",
+        base_url="cursor-sdk://local",
+        session_id="20260612_182716_3fd6e7ae",
+        _interrupt_requested=False,
+        stream_delta_callback=None,
+        reasoning_callback=None,
+        _has_stream_consumers=lambda: False,
+        _fire_stream_delta=lambda text: None,
+        _fire_reasoning_delta=lambda text: None,
+        _fire_tool_gen_started=lambda name: None,
+        _touch_activity=lambda message: None,
+        _buffer_status=lambda message: None,
+        _current_streamed_assistant_text="",
+        _is_provider_stream_parse_error=lambda exc: False,
+        _create_request_openai_client=lambda *a, **k: pytest.fail(
+            "cursor-sdk streaming dispatch must not build an OpenAI client"
+        ),
+        _abort_request_openai_client=lambda *a, **k: None,
+        _close_request_openai_client=lambda *a, **k: None,
+        _replace_primary_openai_client=lambda *a, **k: None,
+    )
+
+    response = interruptible_streaming_api_call(
+        agent,
+        {
+            "model": "composer-2.5",
+            "messages": [{"role": "user", "content": "Reply exactly pong"}],
+            "cursor_model_id": "composer-2.5",
+            "cursor_model_params": {"fast": "false"},
+            "cursor_workspace_root": str(tmp_path),
+            "cursor_timeout_seconds": 90.0,
+            "cursor_max_retries": 1,
+            "session_id": "20260612_182716_3fd6e7ae",
+        },
+    )
+
+    assert response.choices[0].message.content == "pong"
+    assert calls == [
+        {
+            "messages": [{"role": "user", "content": "Reply exactly pong"}],
+            "api_key": "cursor-test-key",
+            "model_id": "composer-2.5",
+            "model_params": {"fast": "false"},
+            "workspace_root": str(tmp_path),
+            "session_id": "20260612_182716_3fd6e7ae",
+            "timeout_seconds": 90.0,
+            "max_retries": 1,
+        }
+    ]
+
+
+def test_switch_model_to_cursor_sdk_does_not_build_openai_client():
+    from agent.agent_runtime_helpers import switch_model
+
+    class Cache(dict):
+        def clear(self):
+            self["cleared"] = True
+
+    agent = SimpleNamespace(
+        model="gpt-5.5",
+        provider="openai-codex",
+        base_url="https://chatgpt.com/backend-api/codex",
+        api_mode="codex_responses",
+        api_key="old-key",
+        client=object(),
+        _anthropic_client=None,
+        _anthropic_api_key=None,
+        _anthropic_base_url=None,
+        _is_anthropic_oauth=False,
+        _config_context_length=None,
+        _client_kwargs={},
+        _transport_cache=Cache(),
+        _create_openai_client=lambda *a, **k: pytest.fail("cursor-sdk switch must not build OpenAI client"),
+        _anthropic_prompt_cache_policy=lambda **kwargs: (False, False),
+        _ensure_lmstudio_runtime_loaded=lambda: None,
+        context_compressor=None,
+        _cached_system_prompt="cached",
+    )
+
+    switch_model(
+        agent,
+        new_model="composer-2.5",
+        new_provider="cursor-sdk",
+        api_key="cursor-test-key",
+        base_url="cursor-sdk://local",
+        api_mode="cursor_sdk",
+    )
+
+    assert agent.model == "composer-2.5"
+    assert agent.provider == "cursor-sdk"
+    assert agent.api_mode == "cursor_sdk"
+    assert agent.base_url == "cursor-sdk://local"
+    assert agent.client is None
+    assert agent._client_kwargs == {}
+    assert agent._transport_cache["cleared"] is True
