@@ -115,6 +115,60 @@ def adapter():
 
 
 # ------------------------------------------------------------------
+# _run_simple_slash interaction lifecycle
+# ------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_run_simple_slash_with_followup_sends_initial_response(adapter):
+    """Known-completion simple slash commands should use the initial
+    response, not defer + edit, so Discord exits slash composer mode."""
+    interaction = SimpleNamespace(
+        user=SimpleNamespace(name="zekamashi", display_name="zekamashi", id=42),
+        channel=SimpleNamespace(id=123),
+        channel_id=123,
+        guild_id=99,
+        response=SimpleNamespace(defer=AsyncMock(), send_message=AsyncMock()),
+        delete_original_response=AsyncMock(),
+        followup=SimpleNamespace(send=AsyncMock()),
+        edit_original_response=AsyncMock(),
+    )
+    adapter.handle_message = AsyncMock()
+
+    await adapter._run_simple_slash(
+        interaction, "/reset", "New conversation started~"
+    )
+
+    adapter.handle_message.assert_awaited_once()
+    interaction.response.send_message.assert_awaited_once_with(
+        "New conversation started~", ephemeral=True
+    )
+    interaction.response.defer.assert_not_awaited()
+    interaction.delete_original_response.assert_not_awaited()
+    interaction.followup.send.assert_not_awaited()
+    interaction.edit_original_response.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_run_simple_slash_without_followup_deletes_only(adapter):
+    interaction = SimpleNamespace(
+        user=SimpleNamespace(name="zekamashi", display_name="zekamashi", id=42),
+        channel=SimpleNamespace(id=123),
+        channel_id=123,
+        guild_id=99,
+        response=SimpleNamespace(defer=AsyncMock()),
+        delete_original_response=AsyncMock(),
+        followup=SimpleNamespace(send=AsyncMock()),
+    )
+    adapter.handle_message = AsyncMock()
+
+    await adapter._run_simple_slash(interaction, "/undo")
+
+    interaction.delete_original_response.assert_awaited_once()
+    interaction.followup.send.assert_not_awaited()
+
+
+# ------------------------------------------------------------------
 # /thread slash command registration
 # ------------------------------------------------------------------
 
