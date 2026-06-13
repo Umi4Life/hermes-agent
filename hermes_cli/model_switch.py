@@ -1963,6 +1963,56 @@ def list_authenticated_providers(
     return results
 
 
+def get_hidden_picker_provider_slugs() -> frozenset[str]:
+    """Provider slugs to omit from interactive /model picker displays.
+
+    Configured via:
+
+    - ``HERMES_HIDDEN_PROVIDERS`` env var (comma-separated slugs/aliases)
+    - ``model_catalog.hidden_providers`` in config.yaml (list or
+      comma-separated string)
+
+    Entries are normalized through the picker slug alias table in
+    ``hermes_cli.models._PROVIDER_ALIASES`` (e.g. ``github-copilot`` →
+    ``copilot``). This filter applies only to :func:`list_picker_providers`
+    and does not affect explicit ``--provider`` resolution or
+    :func:`list_authenticated_providers` text lists.
+    """
+    import os
+
+    from hermes_cli.models import _PROVIDER_ALIASES
+
+    hidden: set[str] = set()
+
+    def _add(raw: str) -> None:
+        key = str(raw or "").strip().lower()
+        if not key:
+            return
+        hidden.add(_PROVIDER_ALIASES.get(key, key))
+
+    env_raw = os.environ.get("HERMES_HIDDEN_PROVIDERS", "").strip()
+    if env_raw:
+        for part in env_raw.split(","):
+            _add(part)
+
+    try:
+        from hermes_cli.config import load_config
+
+        cfg = load_config() or {}
+        cfg_hidden = (cfg.get("model_catalog") or {}).get("hidden_providers")
+        if isinstance(cfg_hidden, str):
+            for part in cfg_hidden.split(","):
+                _add(part)
+        elif isinstance(cfg_hidden, (list, tuple)):
+            for item in cfg_hidden:
+                if isinstance(item, str):
+                    _add(item)
+    except Exception:
+        pass
+
+    return frozenset(hidden)
+
+
 def list_picker_providers(
     current_provider: str = "",
     current_base_url: str = "",
@@ -2001,9 +2051,13 @@ def list_picker_providers(
         current_model=current_model,
     )
 
+    hidden_slugs = get_hidden_picker_provider_slugs()
+
     filtered: List[dict] = []
     for p in providers:
         slug = str(p.get("slug", "")).lower()
+        if slug in hidden_slugs:
+            continue
         if slug == "openrouter":
             try:
                 live = fetch_openrouter_models()

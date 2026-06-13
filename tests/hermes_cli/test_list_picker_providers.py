@@ -259,3 +259,70 @@ def test_current_custom_endpoint_passthrough_marks_current_row(monkeypatch):
     assert row["slug"] == "custom:ollama"
     assert row["is_current"] is True
     assert row["models"] == ["glm-5.1", "qwen3"]
+
+
+def test_hidden_providers_omitted_from_picker(monkeypatch):
+    """HERMES_HIDDEN_PROVIDERS slugs are dropped from picker output only."""
+    base = [
+        _make_provider("copilot", models=["gpt-4.1"]),
+        _make_provider("copilot-acp", models=["copilot-acp"]),
+        _make_provider("openrouter", models=["openai/gpt-5.4"]),
+    ]
+
+    monkeypatch.setenv("HERMES_HIDDEN_PROVIDERS", "copilot,copilot-acp")
+    monkeypatch.setattr(model_switch, "list_authenticated_providers",
+                        lambda **kw: list(base))
+    monkeypatch.setattr("hermes_cli.models.fetch_openrouter_models",
+                        lambda *a, **kw: [("openai/gpt-5.4", "recommended")])
+
+    result = model_switch.list_picker_providers(max_models=50)
+
+    assert [p["slug"] for p in result] == ["openrouter"]
+
+
+def test_non_hidden_providers_still_appear_when_some_hidden(monkeypatch):
+    base = [
+        _make_provider("copilot", models=["gpt-4.1"]),
+        _make_provider("anthropic", models=["claude-sonnet-4-6"]),
+        _make_provider("gemini", models=["gemini-3-flash-preview"]),
+    ]
+
+    monkeypatch.setenv("HERMES_HIDDEN_PROVIDERS", "copilot")
+    monkeypatch.setattr(model_switch, "list_authenticated_providers",
+                        lambda **kw: list(base))
+    monkeypatch.setattr("hermes_cli.models.fetch_openrouter_models",
+                        lambda *a, **kw: pytest.fail("should not be called"))
+
+    result = model_switch.list_picker_providers(max_models=50)
+
+    assert [p["slug"] for p in result] == ["anthropic", "gemini"]
+
+
+def test_hidden_providers_do_not_block_explicit_provider_resolution(monkeypatch):
+    """Picker hide-list must not affect resolve_provider_full / switch_model."""
+    from hermes_cli.providers import ProviderDef, resolve_provider_full
+
+    monkeypatch.setenv("HERMES_HIDDEN_PROVIDERS", "copilot,copilot-acp")
+
+    copilot = resolve_provider_full("copilot")
+    assert copilot is not None
+
+    copilot_acp = resolve_provider_full("copilot-acp")
+    assert copilot_acp is not None
+    assert isinstance(copilot, ProviderDef)
+    assert isinstance(copilot_acp, ProviderDef)
+
+    base = [
+        _make_provider("copilot", models=["gpt-4.1"]),
+        _make_provider("openrouter", models=["openai/gpt-5.4"]),
+    ]
+    monkeypatch.setattr(model_switch, "list_authenticated_providers",
+                        lambda **kw: list(base))
+    monkeypatch.setattr("hermes_cli.models.fetch_openrouter_models",
+                        lambda *a, **kw: [("openai/gpt-5.4", "")])
+
+    picker = model_switch.list_picker_providers(max_models=50)
+    text_list = model_switch.list_authenticated_providers(max_models=50)
+
+    assert [p["slug"] for p in picker] == ["openrouter"]
+    assert [p["slug"] for p in text_list] == ["copilot", "openrouter"]
