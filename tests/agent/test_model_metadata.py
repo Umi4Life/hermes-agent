@@ -1303,3 +1303,30 @@ class TestGrok43StaleCacheGuard:
                 slug, base_url=base, api_key="", provider="xai"
             )
             assert ctx == 256_000, f"{slug} should stay 256000, got {ctx}"
+
+
+class TestCursorSdkProviderContextLength:
+    def test_cursor_sdk_honors_providers_config_without_probe_down(self, caplog):
+        config = {
+            "providers": {
+                "cursor-sdk": {
+                    "context_length": 200_000,
+                    "models": {
+                        "composer-2.5": {"context_length": 200_000},
+                    },
+                }
+            }
+        }
+        with patch("hermes_cli.config.load_config_readonly", return_value=config), \
+             patch("agent.model_metadata.get_cached_context_length", return_value=None), \
+             patch("agent.model_metadata.fetch_endpoint_model_metadata", return_value={}), \
+             patch("agent.model_metadata.fetch_model_metadata", return_value={}), \
+             patch("agent.model_metadata.is_local_endpoint", return_value=False), \
+             caplog.at_level("INFO", logger="agent.model_metadata"):
+            ctx = get_model_context_length(
+                "composer-2.5",
+                base_url="cursor-sdk://local",
+                provider="cursor-sdk",
+            )
+        assert ctx == 200_000
+        assert "probe-down" not in caplog.text

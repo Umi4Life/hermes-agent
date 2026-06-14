@@ -44,12 +44,95 @@ _CURSOR_SDK_API_KWARGS = {
     "cursor_workspace_root",
     "cursor_timeout_seconds",
     "cursor_max_retries",
+    "cursor_mode",
+    "prompt_mode",
 }
 
 
 def _without_cursor_sdk_kwargs(api_kwargs: dict) -> dict:
     """Return OpenAI-compatible kwargs with Cursor-SDK-only fields removed."""
     return {k: v for k, v in api_kwargs.items() if k not in _CURSOR_SDK_API_KWARGS}
+
+
+def _cursor_sdk_call_kwargs(agent, api_kwargs: dict) -> dict:
+    """Build kwargs for ``run_cursor_sdk_chat_completion`` from agent + api payload."""
+    cursor_cfg = getattr(agent, "request_overrides", {}) or {}
+    return {
+        "messages": api_kwargs.get("messages", []),
+        "api_key": getattr(agent, "api_key", "") or api_kwargs.get("api_key", ""),
+        "model_id": (
+            api_kwargs.get("cursor_model_id")
+            or cursor_cfg.get("cursor_model_id")
+            or agent.model
+            or "composer-2.5"
+        ),
+        "model_params": (
+            api_kwargs.get("cursor_model_params")
+            or cursor_cfg.get("cursor_model_params")
+            or {"fast": "false"}
+        ),
+        "workspace_root": (
+            api_kwargs.get("cursor_workspace_root")
+            or cursor_cfg.get("cursor_workspace_root")
+        ),
+        "session_id": api_kwargs.get("session_id") or getattr(agent, "session_id", None),
+        "timeout_seconds": (
+            api_kwargs.get("cursor_timeout_seconds")
+            or cursor_cfg.get("cursor_timeout_seconds")
+            or _env_float("HERMES_CURSOR_TIMEOUT_SECONDS", 180.0)
+        ),
+        "max_retries": (
+            api_kwargs.get("cursor_max_retries")
+            if api_kwargs.get("cursor_max_retries") is not None
+            else cursor_cfg.get("cursor_max_retries", 1)
+        ),
+        "cursor_mode": (
+            api_kwargs.get("cursor_mode")
+            or cursor_cfg.get("cursor_mode")
+            or "chat"
+        ),
+        "prompt_mode": (
+            api_kwargs.get("prompt_mode")
+            or cursor_cfg.get("prompt_mode")
+            or "slim"
+        ),
+    }
+
+
+def _maybe_emit_incompetent_fallback_warning(
+    agent,
+    *,
+    old_model: str,
+    fb_model: str,
+    fb_provider: str,
+) -> None:
+    """Warn when fallback lands on a chatbot-tier Qwen model."""
+    model_lower = (fb_model or "").strip().lower()
+    if "qwen" not in model_lower:
+        return
+
+    warning = (
+        f"⚠ MODEL FALLBACK WARNING: Primary model {old_model!r} failed — "
+        f"falling back to {fb_model!r} via {fb_provider}. "
+        "This fallback model is EXTREMELY INCOMPETENT (Chatbot tier only). "
+        "Expect degraded reasoning and tool use."
+    )
+    emit_warning = getattr(agent, "_emit_warning", None)
+    if callable(emit_warning):
+        emit_warning(warning)
+
+    emit_notice = getattr(agent, "_emit_notice", None)
+    if callable(emit_notice):
+        from agent.credits_tracker import AgentNotice
+
+        emit_notice(
+            AgentNotice(
+                text=f"Fallback active on incompetent tier model {fb_model!r}",
+                level="warn",
+                kind="sticky",
+                key="fallback.incompetent_tier",
+            )
+        )
 
 
 def _ra():
@@ -214,14 +297,7 @@ def interruptible_api_call(agent, api_kwargs: dict):
                 from agent.cursor_sdk_adapter import run_cursor_sdk_chat_completion
 
                 result["response"] = run_cursor_sdk_chat_completion(
-                    messages=api_kwargs.get("messages", []),
-                    api_key=getattr(agent, "api_key", "") or api_kwargs.get("api_key", ""),
-                    model_id=api_kwargs.get("cursor_model_id") or agent.model or "composer-2.5",
-                    model_params=api_kwargs.get("cursor_model_params") or {"fast": "false"},
-                    workspace_root=api_kwargs.get("cursor_workspace_root"),
-                    session_id=api_kwargs.get("session_id") or getattr(agent, "session_id", None),
-                    timeout_seconds=api_kwargs.get("cursor_timeout_seconds") or 90.0,
-                    max_retries=api_kwargs.get("cursor_max_retries", 1),
+                    **_cursor_sdk_call_kwargs(agent, api_kwargs),
                 )
             elif agent.api_mode == "bedrock_converse":
                 # Bedrock uses boto3 directly — no OpenAI client needed.
@@ -602,8 +678,10 @@ def build_api_kwargs(agent, api_messages: list) -> dict:
             cursor_model_id=cursor_cfg.get("cursor_model_id") or agent.model or "composer-2.5",
             cursor_model_params=cursor_cfg.get("cursor_model_params") or {"fast": "false"},
             cursor_workspace_root=cursor_cfg.get("cursor_workspace_root") or os.getenv("HERMES_CURSOR_WORKSPACE_ROOT"),
-            cursor_timeout_seconds=cursor_cfg.get("cursor_timeout_seconds") or _env_float("HERMES_CURSOR_TIMEOUT_SECONDS", 90.0),
+            cursor_timeout_seconds=cursor_cfg.get("cursor_timeout_seconds") or _env_float("HERMES_CURSOR_TIMEOUT_SECONDS", 180.0),
             cursor_max_retries=cursor_cfg.get("cursor_max_retries", 1),
+            cursor_mode=cursor_cfg.get("cursor_mode") or "chat",
+            prompt_mode=cursor_cfg.get("prompt_mode") or "slim",
             session_id=getattr(agent, "session_id", None),
         )
 
@@ -1191,10 +1269,11 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
 
         old_model = agent.model
 
-        # Clear the per-config context_length override so the fallback
-        # model's actual context window is resolved instead of inheriting
-        # the stale value from the previous model.  See #22387.
-        agent._config_context_length = None
+        # Clear stale per-model override, then re-resolve from providers config
+        # so fallback targets like cursor-sdk honor providers.<id>.context_length.
+        from hermes_cli.config import get_provider_context_length
+
+        agent._config_context_length = get_provider_context_length(fb_provider, fb_model)
         agent.model = fb_model
         agent.provider = fb_provider
         agent.base_url = fb_base_url
@@ -1241,19 +1320,20 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
             agent.client = None
             agent._client_kwargs = {}
         elif fb_api_mode == "cursor_sdk":
+            from hermes_cli.config import get_cursor_sdk_settings
+
             agent.api_key = fb_api_key_hint or ""
             agent.client = None
             agent._client_kwargs = {}
+            _sdk_settings = get_cursor_sdk_settings()
             agent.request_overrides = {
                 "cursor_model_id": fb_model or "composer-2.5",
-                "cursor_model_params": {"fast": "false"},
-                "cursor_workspace_root": os.getenv(
-                    "HERMES_CURSOR_WORKSPACE_ROOT", "/srv/hermes-cursor/workspaces",
-                ),
-                "cursor_timeout_seconds": float(
-                    os.getenv("HERMES_CURSOR_TIMEOUT_SECONDS", "90"),
-                ),
-                "cursor_max_retries": int(os.getenv("HERMES_CURSOR_MAX_RETRIES", "1")),
+                "cursor_model_params": _sdk_settings["cursor_model_params"],
+                "cursor_workspace_root": _sdk_settings["cursor_workspace_root"],
+                "cursor_timeout_seconds": _sdk_settings["cursor_timeout_seconds"],
+                "cursor_max_retries": _sdk_settings["cursor_max_retries"],
+                "cursor_mode": _sdk_settings["cursor_mode"],
+                "prompt_mode": _sdk_settings["prompt_mode"],
             }
         else:
             # Swap OpenAI client and config in-place
@@ -1331,6 +1411,12 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
         logger.info(
             "Fallback activated: %s → %s (%s)",
             old_model, fb_model, fb_provider,
+        )
+        _maybe_emit_incompetent_fallback_warning(
+            agent,
+            old_model=old_model,
+            fb_model=fb_model,
+            fb_provider=fb_provider,
         )
         return True
     except Exception as e:
@@ -1702,19 +1788,40 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
     if agent.api_mode == "cursor_sdk" or agent.provider == "cursor-sdk":
         from agent.cursor_sdk_adapter import run_cursor_sdk_chat_completion
 
-        response = run_cursor_sdk_chat_completion(
-            messages=api_kwargs.get("messages", []),
-            api_key=getattr(agent, "api_key", "") or api_kwargs.get("api_key", ""),
-            model_id=api_kwargs.get("cursor_model_id") or agent.model or "composer-2.5",
-            model_params=api_kwargs.get("cursor_model_params") or {"fast": "false"},
-            workspace_root=api_kwargs.get("cursor_workspace_root"),
-            session_id=api_kwargs.get("session_id") or getattr(agent, "session_id", None),
-            timeout_seconds=api_kwargs.get("cursor_timeout_seconds") or 90.0,
-            max_retries=api_kwargs.get("cursor_max_retries", 1),
-        )
-        if agent._interrupt_requested:
-            raise InterruptedError("Agent interrupted during Cursor SDK API call")
-        return response
+        result = {"response": None, "error": None}
+        first_delta_fired = {"done": False}
+
+        def _fire_first():
+            if not first_delta_fired["done"] and on_first_delta:
+                first_delta_fired["done"] = True
+                try:
+                    on_first_delta()
+                except Exception:
+                    pass
+
+        def _on_delta(text: str):
+            _fire_first()
+            agent._fire_stream_delta(text)
+
+        def _cursor_call():
+            try:
+                kwargs = _cursor_sdk_call_kwargs(agent, api_kwargs)
+                if agent._has_stream_consumers():
+                    kwargs["on_text_delta"] = _on_delta
+                kwargs["interrupt_check"] = lambda: agent._interrupt_requested
+                result["response"] = run_cursor_sdk_chat_completion(**kwargs)
+            except Exception as exc:
+                result["error"] = exc
+
+        t = threading.Thread(target=_cursor_call, daemon=True)
+        t.start()
+        while t.is_alive():
+            t.join(timeout=0.3)
+            if agent._interrupt_requested:
+                raise InterruptedError("Agent interrupted during Cursor SDK API call")
+        if result["error"] is not None:
+            raise result["error"]
+        return result["response"]
 
     result = {"response": None, "error": None, "partial_tool_names": []}
     request_client_holder = {"client": None, "diag": None, "owner_tid": None}

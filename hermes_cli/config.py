@@ -1634,6 +1634,16 @@ DEFAULT_CONFIG = {
         "min_ms": 800,
         "max_ms": 2500,
     },
+
+    # Cursor SDK provider — Composer via direct Python cursor-sdk integration.
+    # mode: chat (default, slim prompt, TERMINAL_CWD/getcwd) | workspace | coding
+    "cursor_sdk": {
+        "mode": "chat",
+        "timeout_seconds": 180,
+        "max_retries": 1,
+        "workspace_root": "/srv/hermes-cursor/workspaces",
+        "prompt_mode": "slim",
+    },
     
     # Context engine -- controls how the context window is managed when
     # approaching the model's token limit.
@@ -3736,6 +3746,17 @@ def _normalize_custom_provider_entry(
                     provider_key or "?", url_key, candidate,
                 )
     if not base_url:
+        key = provider_key.strip().lower().replace("_", "-")
+        if key:
+            try:
+                from hermes_cli.providers import HERMES_OVERLAYS
+
+                overlay = HERMES_OVERLAYS.get(key)
+                if overlay and overlay.base_url_override:
+                    base_url = overlay.base_url_override
+            except Exception:
+                pass
+    if not base_url:
         return None
 
     name = ""
@@ -3903,6 +3924,94 @@ def get_compatible_custom_providers(
     return compatible
 
 
+def get_provider_context_length(
+    provider_id: str,
+    model: str | None = None,
+    config: dict | None = None,
+) -> int | None:
+    """Return context_length from ``providers.<id>`` config.
+
+    Precedence within the provider block:
+      1. ``providers[id].models[model].context_length``
+      2. ``providers[id].context_length``
+    """
+    if not provider_id:
+        return None
+
+    if config is None:
+        try:
+            config = load_config_readonly()
+        except Exception:
+            return None
+
+    providers = config.get("providers", {}) if isinstance(config, dict) else {}
+    if not isinstance(providers, dict):
+        return None
+
+    normalized_id = provider_id.strip().lower().replace("_", "-")
+    provider_config = None
+    for key, entry in providers.items():
+        if not isinstance(key, str):
+            continue
+        if key.strip().lower().replace("_", "-") == normalized_id:
+            provider_config = entry
+            break
+    if not isinstance(provider_config, dict):
+        return None
+
+    models = provider_config.get("models")
+    if model and isinstance(models, dict):
+        model_cfg = models.get(model)
+        if isinstance(model_cfg, dict):
+            raw_ctx = model_cfg.get("context_length")
+            try:
+                ctx = int(raw_ctx)
+            except (TypeError, ValueError):
+                ctx = 0
+            if ctx > 0:
+                return ctx
+
+    raw_provider_ctx = provider_config.get("context_length")
+    try:
+        provider_ctx = int(raw_provider_ctx)
+    except (TypeError, ValueError):
+        provider_ctx = 0
+    if provider_ctx > 0:
+        return provider_ctx
+    return None
+
+
+def get_cursor_sdk_settings(config: dict | None = None) -> dict[str, Any]:
+    """Return merged Cursor SDK runtime settings from config with env fallbacks."""
+    section: dict[str, Any] = {}
+    if config is None:
+        try:
+            config = load_config_readonly()
+        except Exception:
+            config = {}
+    if isinstance(config, dict):
+        raw = config.get("cursor_sdk")
+        if isinstance(raw, dict):
+            section = raw
+
+    timeout_default = float(section.get("timeout_seconds") or 180)
+    max_retries_default = int(section.get("max_retries") if section.get("max_retries") is not None else 1)
+    return {
+        "cursor_mode": str(section.get("mode") or "chat"),
+        "prompt_mode": str(section.get("prompt_mode") or "slim"),
+        "cursor_timeout_seconds": float(
+            os.getenv("HERMES_CURSOR_TIMEOUT_SECONDS", str(timeout_default))
+        ),
+        "cursor_max_retries": int(os.getenv("HERMES_CURSOR_MAX_RETRIES", str(max_retries_default))),
+        "cursor_workspace_root": (
+            os.getenv("HERMES_CURSOR_WORKSPACE_ROOT")
+            or section.get("workspace_root")
+            or "/srv/hermes-cursor/workspaces"
+        ),
+        "cursor_model_params": {"fast": "false"},
+    }
+
+
 def get_custom_provider_context_length(
     model: str,
     base_url: str,
@@ -3951,20 +4060,25 @@ def get_custom_provider_context_length(
         if not entry_url or entry_url != target_url:
             continue
         models = entry.get("models")
-        if not isinstance(models, dict):
-            continue
-        model_cfg = models.get(model)
-        if not isinstance(model_cfg, dict):
-            continue
-        raw_ctx = model_cfg.get("context_length")
-        if raw_ctx is None:
-            continue
-        try:
-            ctx = int(raw_ctx)
-        except (TypeError, ValueError):
-            continue
-        if ctx > 0:
-            return ctx
+        if isinstance(models, dict) and model:
+            model_cfg = models.get(model)
+            if isinstance(model_cfg, dict):
+                raw_ctx = model_cfg.get("context_length")
+                if raw_ctx is not None:
+                    try:
+                        ctx = int(raw_ctx)
+                    except (TypeError, ValueError):
+                        ctx = 0
+                    if ctx > 0:
+                        return ctx
+        raw_entry_ctx = entry.get("context_length")
+        if raw_entry_ctx is not None:
+            try:
+                entry_ctx = int(raw_entry_ctx)
+            except (TypeError, ValueError):
+                entry_ctx = 0
+            if entry_ctx > 0:
+                return entry_ctx
     return None
 
 

@@ -226,6 +226,31 @@ class TestGetModelContextLengthHonorsOverride:
         assert ctx == DEFAULT_FALLBACK_CONTEXT
 
 
+class TestGetProviderContextLength:
+    def test_provider_level_context_length_without_models_block(self):
+        from hermes_cli.config import get_provider_context_length
+
+        config = {
+            "providers": {
+                "cursor-sdk": {"context_length": 200_000},
+            }
+        }
+        assert get_provider_context_length("cursor-sdk", "composer-2.5", config=config) == 200_000
+
+    def test_model_specific_override_wins_over_provider_level(self):
+        from hermes_cli.config import get_provider_context_length
+
+        config = {
+            "providers": {
+                "cursor-sdk": {
+                    "context_length": 128_000,
+                    "models": {"composer-2.5": {"context_length": 200_000}},
+                }
+            }
+        }
+        assert get_provider_context_length("cursor-sdk", "composer-2.5", config=config) == 200_000
+
+
 class TestContextProbeTiers:
     def test_256k_is_top_tier_and_default(self):
         """The stepdown probe starts at 256K and 256K is the new default."""

@@ -1497,10 +1497,13 @@ def resolve_runtime_provider(
         }
 
     if provider == "cursor-sdk":
+        from hermes_cli.config import get_cursor_sdk_settings
+
         creds = resolve_api_key_provider_credentials(provider)
         cursor_model = (target_model or model_cfg.get("default") or "composer-2.5").strip()
         if not cursor_model or cursor_model == "cursor-sdk":
             cursor_model = "composer-2.5"
+        sdk_settings = get_cursor_sdk_settings()
         return {
             "provider": "cursor-sdk",
             "api_mode": "cursor_sdk",
@@ -1510,10 +1513,12 @@ def resolve_runtime_provider(
             "requested_provider": requested_provider,
             "request_overrides": {
                 "cursor_model_id": cursor_model,
-                "cursor_model_params": {"fast": "false"},
-                "cursor_workspace_root": os.getenv("HERMES_CURSOR_WORKSPACE_ROOT", "/srv/hermes-cursor/workspaces"),
-                "cursor_timeout_seconds": float(os.getenv("HERMES_CURSOR_TIMEOUT_SECONDS", "90")),
-                "cursor_max_retries": int(os.getenv("HERMES_CURSOR_MAX_RETRIES", "1")),
+                "cursor_model_params": sdk_settings["cursor_model_params"],
+                "cursor_workspace_root": sdk_settings["cursor_workspace_root"],
+                "cursor_timeout_seconds": sdk_settings["cursor_timeout_seconds"],
+                "cursor_max_retries": sdk_settings["cursor_max_retries"],
+                "cursor_mode": sdk_settings["cursor_mode"],
+                "prompt_mode": sdk_settings["prompt_mode"],
             },
         }
 

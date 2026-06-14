@@ -343,6 +343,13 @@ def _is_custom_endpoint(base_url: str) -> bool:
     return bool(normalized) and not _is_openrouter_base_url(normalized)
 
 
+_PSEUDO_BASE_URLS: Dict[str, str] = {
+    "cursor-sdk://local": "cursor-sdk",
+    "acp://copilot": "copilot-acp",
+    "acp+tcp://copilot": "copilot-acp",
+    "cloudcode-pa://google": "gemini-cloudcode",
+}
+
 _URL_TO_PROVIDER: Dict[str, str] = {
     "api.openai.com": "openai",
     "chatgpt.com": "openai",
@@ -405,6 +412,9 @@ def _infer_provider_from_url(base_url: str) -> Optional[str]:
     normalized = _normalize_base_url(base_url)
     if not normalized:
         return None
+    pseudo = normalized.rstrip("/")
+    if pseudo in _PSEUDO_BASE_URLS:
+        return _PSEUDO_BASE_URLS[pseudo]
     parsed = urlparse(normalized if "://" in normalized else f"https://{normalized}")
     host = parsed.netloc.lower() or parsed.path.lower()
     for url_part, provider in _URL_TO_PROVIDER.items():
@@ -1510,6 +1520,8 @@ def get_model_context_length(
 
     Resolution order:
     0. Explicit config override (model.context_length or custom_providers per-model)
+    0a. providers.<id> context_length (model-specific, then provider-level)
+    0b. custom_providers per-model / provider-level override
     1. Persistent cache (previously discovered via probing).  Nous URLs
        bypass the cache here so step 5b can always reconcile against
        the authoritative portal /v1/models response.
@@ -1533,6 +1545,17 @@ def get_model_context_length(
     # 0. Explicit config override — user knows best
     if config_context_length is not None and isinstance(config_context_length, int) and config_context_length > 0:
         return config_context_length
+
+    # 0a. providers.<id> context_length from config.yaml
+    if provider:
+        try:
+            from hermes_cli.config import get_provider_context_length
+
+            provider_ctx = get_provider_context_length(provider, model)
+            if provider_ctx:
+                return provider_ctx
+        except Exception:
+            pass
 
     # 0b. custom_providers per-model override — check before any probe.
     # This closes the gap where /model switch and display paths used to fall

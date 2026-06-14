@@ -17,8 +17,9 @@ class _FakeAgentResult:
         self.agent_id = agent_id
 
 
-def _install_fake_cursor_sdk(monkeypatch, prompt_impl):
+def _install_fake_cursor_sdk(monkeypatch, prompt_impl, *, streaming_impl=None):
     calls = []
+    stream_calls = []
 
     class FakeModelParameterValue:
         def __init__(self, id, value):
@@ -40,11 +41,48 @@ def _install_fake_cursor_sdk(monkeypatch, prompt_impl):
             self.model = model
             self.local = local
 
+    class FakeRun:
+        def __init__(self, result):
+            self._result = result
+
+        def iter_text(self):
+            yield "po"
+            yield "ng"
+
+        def supports(self, name):
+            return name == "cancel"
+
+        def cancel(self):
+            return None
+
+        def wait(self):
+            return self._result
+
+    class FakeStreamingAgent:
+        def __init__(self, **kwargs):
+            stream_calls.append(kwargs)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def send(self, prompt):
+            stream_calls.append({"prompt": prompt})
+            if streaming_impl:
+                return streaming_impl(prompt, stream_calls)
+            return FakeRun(_FakeAgentResult(result="pong"))
+
     class FakeAgent:
         @staticmethod
         def prompt(prompt, options):
             calls.append((prompt, options, dict(os.environ)))
             return prompt_impl(prompt, options, calls)
+
+        @staticmethod
+        def create(**kwargs):
+            return FakeStreamingAgent(**kwargs)
 
     fake = types.SimpleNamespace(
         Agent=FakeAgent,
@@ -54,7 +92,7 @@ def _install_fake_cursor_sdk(monkeypatch, prompt_impl):
         ModelSelection=FakeModelSelection,
     )
     monkeypatch.setitem(sys.modules, "cursor_sdk", fake)
-    return calls
+    return calls, stream_calls
 
 
 def test_cursor_sdk_success_returns_openai_shaped_response_with_metadata(monkeypatch, tmp_path):
@@ -63,12 +101,14 @@ def test_cursor_sdk_success_returns_openai_shaped_response_with_metadata(monkeyp
     calls = _install_fake_cursor_sdk(
         monkeypatch,
         lambda prompt, options, calls: _FakeAgentResult(result="pong", run_id="run-ok", agent_id="agent-ok"),
-    )
+    )[0]
 
     response = run_cursor_sdk_chat_completion(
         messages=[{"role": "user", "content": "Reply exactly pong"}],
         api_key="cursor-test-key",
         workspace_root=tmp_path,
+        cursor_mode="workspace",
+        session_id="session-1",
         timeout_seconds=5,
     )
 
@@ -173,7 +213,7 @@ def test_cursor_sdk_sanitizes_hermes_secrets_from_sdk_process_environment(monkey
     monkeypatch.setenv("OPENAI_API_KEY", "sk-sho...leak")
     monkeypatch.setenv("HERMES_SECRET_THING", "should-not-leak")
     monkeypatch.setenv("PATH", os.environ.get("PATH", ""))
-    calls = _install_fake_cursor_sdk(
+    calls, _ = _install_fake_cursor_sdk(
         monkeypatch,
         lambda prompt, options, calls: _FakeAgentResult(result="pong"),
     )
@@ -359,8 +399,157 @@ def test_cursor_sdk_streaming_dispatch_uses_adapter_not_openai_client(monkeypatc
             "session_id": "20260612_182716_3fd6e7ae",
             "timeout_seconds": 90.0,
             "max_retries": 1,
+            "cursor_mode": "chat",
+            "prompt_mode": "slim",
+            "on_text_delta": None,
+            "interrupt_check": pytest.ANY,
         }
     ]
+
+
+def test_cursor_sdk_default_timeout_is_180():
+    from agent.cursor_sdk_adapter import DEFAULT_CURSOR_TIMEOUT_SECONDS
+
+    assert DEFAULT_CURSOR_TIMEOUT_SECONDS == 180.0
+
+
+def test_cursor_sdk_slim_prompt_omits_system_and_tools(monkeypatch, tmp_path):
+    from agent.cursor_sdk_adapter import run_cursor_sdk_chat_completion
+
+    calls, _ = _install_fake_cursor_sdk(
+        monkeypatch,
+        lambda prompt, options, calls: _FakeAgentResult(result="pong"),
+    )
+
+    run_cursor_sdk_chat_completion(
+        messages=[
+            {"role": "system", "content": "You are Hermes"},
+            {"role": "user", "content": "first"},
+            {"role": "assistant", "content": "middle"},
+            {"role": "tool", "content": '{"ok": true}'},
+            {"role": "user", "content": "Reply exactly pong"},
+        ],
+        api_key="cursor-test-key",
+        workspace_root=tmp_path,
+        prompt_mode="slim",
+        timeout_seconds=5,
+    )
+
+    prompt = calls[0][0]
+    assert "[HERMES CHAT]" in prompt
+    assert "You are Hermes" not in prompt
+    assert '{"ok": true}' not in prompt
+    assert "Reply exactly pong" in prompt
+
+
+def test_cursor_sdk_chat_mode_uses_terminal_cwd(monkeypatch, tmp_path):
+    from agent.cursor_sdk_adapter import run_cursor_sdk_chat_completion
+
+    chat_cwd = tmp_path / "chat-cwd"
+    chat_cwd.mkdir()
+    monkeypatch.setenv("TERMINAL_CWD", str(chat_cwd))
+    calls, _ = _install_fake_cursor_sdk(
+        monkeypatch,
+        lambda prompt, options, calls: _FakeAgentResult(result="pong"),
+    )
+
+    run_cursor_sdk_chat_completion(
+        messages=[{"role": "user", "content": "Reply exactly pong"}],
+        api_key="cursor-test-key",
+        workspace_root=tmp_path / "workspace-root",
+        session_id="session-abc",
+        cursor_mode="chat",
+        timeout_seconds=5,
+    )
+
+    assert Path(calls[0][1].local.cwd) == chat_cwd
+
+
+def test_cursor_sdk_call_shape_logged(monkeypatch, tmp_path, caplog):
+    from agent.cursor_sdk_adapter import run_cursor_sdk_chat_completion
+
+    _install_fake_cursor_sdk(
+        monkeypatch,
+        lambda prompt, options, calls: _FakeAgentResult(result="pong"),
+    )
+
+    with caplog.at_level("INFO", logger="agent.cursor_sdk_adapter"):
+        run_cursor_sdk_chat_completion(
+            messages=[{"role": "user", "content": "Reply exactly pong"}],
+            api_key="cursor-test-key",
+            workspace_root=tmp_path,
+            timeout_seconds=5,
+        )
+
+    assert "Cursor SDK call:" in caplog.text
+    assert "cursor_mode=chat" in caplog.text
+    assert "prompt_mode=slim" in caplog.text
+    assert "local_workspace_enabled=False" in caplog.text
+
+
+def test_cursor_sdk_workspace_mode_uses_session_subdirectory(monkeypatch, tmp_path):
+    from agent.cursor_sdk_adapter import run_cursor_sdk_chat_completion
+
+    calls, _ = _install_fake_cursor_sdk(
+        monkeypatch,
+        lambda prompt, options, calls: _FakeAgentResult(result="pong"),
+    )
+
+    run_cursor_sdk_chat_completion(
+        messages=[{"role": "user", "content": "Reply exactly pong"}],
+        api_key="cursor-test-key",
+        workspace_root=tmp_path,
+        session_id="session-abc",
+        cursor_mode="workspace",
+        timeout_seconds=5,
+    )
+
+    workspace_path = Path(calls[0][1].local.cwd)
+    assert workspace_path.is_relative_to(tmp_path)
+    assert workspace_path.name == "session-abc"
+
+
+def test_cursor_sdk_coding_mode_alias_uses_workspace(monkeypatch, tmp_path):
+    from agent.cursor_sdk_adapter import run_cursor_sdk_chat_completion
+
+    calls, _ = _install_fake_cursor_sdk(
+        monkeypatch,
+        lambda prompt, options, calls: _FakeAgentResult(result="pong"),
+    )
+
+    run_cursor_sdk_chat_completion(
+        messages=[{"role": "user", "content": "Reply exactly pong"}],
+        api_key="cursor-test-key",
+        workspace_root=tmp_path,
+        session_id="coding-session",
+        cursor_mode="coding",
+        timeout_seconds=5,
+    )
+
+    assert Path(calls[0][1].local.cwd).name == "coding-session"
+
+
+def test_cursor_sdk_streaming_uses_agent_create_and_deltas(monkeypatch, tmp_path):
+    from agent.cursor_sdk_adapter import run_cursor_sdk_chat_completion
+
+    _, stream_calls = _install_fake_cursor_sdk(
+        monkeypatch,
+        lambda prompt, options, calls: _FakeAgentResult(result="unused"),
+    )
+    deltas = []
+
+    response = run_cursor_sdk_chat_completion(
+        messages=[{"role": "user", "content": "Reply exactly pong"}],
+        api_key="cursor-test-key",
+        workspace_root=tmp_path,
+        timeout_seconds=5,
+        on_text_delta=deltas.append,
+    )
+
+    assert response.choices[0].message.content == "pong"
+    assert deltas == ["po", "ng"]
+    assert stream_calls
+    assert stream_calls[0]["api_key"] == "cursor-test-key"
 
 
 def test_switch_model_to_cursor_sdk_does_not_build_openai_client():

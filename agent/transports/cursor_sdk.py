@@ -41,6 +41,8 @@ class CursorSDKTransport(ProviderTransport):
             "cursor_workspace_root": params.get("cursor_workspace_root"),
             "cursor_timeout_seconds": params.get("cursor_timeout_seconds"),
             "cursor_max_retries": params.get("cursor_max_retries", 1),
+            "cursor_mode": params.get("cursor_mode") or "chat",
+            "prompt_mode": params.get("prompt_mode") or "slim",
             "session_id": params.get("session_id"),
         }
 
