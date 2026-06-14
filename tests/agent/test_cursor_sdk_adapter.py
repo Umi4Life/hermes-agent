@@ -110,7 +110,7 @@ def test_cursor_sdk_empty_result_is_failure_and_retried_once(monkeypatch, tmp_pa
     assert response.cursor_metadata["run_id"] == "run-retry"
 
 
-def test_cursor_sdk_failure_after_retry_returns_structured_error_without_choices(monkeypatch, tmp_path):
+def test_cursor_sdk_failure_after_retry_returns_structured_error_without_choices(monkeypatch, tmp_path, caplog):
     from agent.cursor_sdk_adapter import run_cursor_sdk_chat_completion
 
     _install_fake_cursor_sdk(
@@ -118,18 +118,53 @@ def test_cursor_sdk_failure_after_retry_returns_structured_error_without_choices
         lambda prompt, options, calls: _FakeAgentResult(status="error", result="", run_id=f"run-{len(calls)}"),
     )
 
-    response = run_cursor_sdk_chat_completion(
-        messages=[{"role": "user", "content": "Reply exactly pong"}],
-        api_key="cursor-test-key",
-        workspace_root=tmp_path,
-        max_retries=1,
-        timeout_seconds=5,
-    )
+    with caplog.at_level("WARNING", logger="agent.cursor_sdk_adapter"):
+        response = run_cursor_sdk_chat_completion(
+            messages=[{"role": "user", "content": "Reply exactly pong"}],
+            api_key="cursor-test-key",
+            workspace_root=tmp_path,
+            max_retries=1,
+            timeout_seconds=5,
+        )
 
     assert response.choices == []
     assert response.cursor_metadata["status"] == "error"
+    assert response.cursor_metadata["sdk_status"] == "error"
     assert response.cursor_metadata["retry_count"] == 1
-    assert "empty result" in response.cursor_metadata["raw_error"]
+    assert response.cursor_metadata["error"] == {
+        "type": "CursorSDKCallError",
+        "message": "Cursor SDK returned status='error'",
+    }
+    assert "status=error" in caplog.text
+    assert "Cursor SDK call failed before fallback" in caplog.text
+
+
+def test_cursor_sdk_empty_final_result_logs_empty_result(monkeypatch, tmp_path, caplog):
+    from agent.cursor_sdk_adapter import run_cursor_sdk_chat_completion
+
+    _install_fake_cursor_sdk(
+        monkeypatch,
+        lambda prompt, options, calls: _FakeAgentResult(status="finished", result="", run_id=f"run-{len(calls)}"),
+    )
+
+    with caplog.at_level("WARNING", logger="agent.cursor_sdk_adapter"):
+        response = run_cursor_sdk_chat_completion(
+            messages=[{"role": "user", "content": "Reply exactly pong"}],
+            api_key="cursor-test-key",
+            workspace_root=tmp_path,
+            max_retries=0,
+            timeout_seconds=5,
+        )
+
+    assert response.choices == []
+    assert response.cursor_metadata["status"] == "empty_result"
+    assert response.cursor_metadata["sdk_status"] == "finished"
+    assert response.cursor_metadata["raw_error"] == "Cursor SDK returned empty result"
+    assert response.cursor_metadata["error"] == {
+        "type": "CursorSDKCallError",
+        "message": "Cursor SDK returned empty result",
+    }
+    assert "status=empty_result" in caplog.text
 
 
 def test_cursor_sdk_sanitizes_hermes_secrets_from_sdk_process_environment(monkeypatch, tmp_path):
@@ -240,7 +275,6 @@ def test_agent_init_admits_cursor_sdk_api_mode_without_downgrading_to_chat(monke
         model="composer-2.5",
         provider="cursor-sdk",
         base_url="cursor-sdk://local",
-        api_key="cursor-test-key",
         api_mode="cursor_sdk",
         enabled_toolsets=[],
         skip_context_files=True,
@@ -250,6 +284,7 @@ def test_agent_init_admits_cursor_sdk_api_mode_without_downgrading_to_chat(monke
 
     assert agent.provider == "cursor-sdk"
     assert agent.api_mode == "cursor_sdk"
+    assert agent.api_key == "cursor-test-key"
 
 
 def test_cursor_sdk_streaming_dispatch_uses_adapter_not_openai_client(monkeypatch, tmp_path):

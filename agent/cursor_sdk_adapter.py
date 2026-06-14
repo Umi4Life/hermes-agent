@@ -8,6 +8,7 @@ can consume Cursor agent output without a Node bridge.
 from __future__ import annotations
 
 import concurrent.futures
+import logging
 import os
 import time
 import uuid
@@ -21,6 +22,8 @@ DEFAULT_CURSOR_MODEL_PARAMS = {"fast": "false"}
 DEFAULT_CURSOR_TIMEOUT_SECONDS = 90.0
 DEFAULT_CURSOR_MAX_RETRIES = 1
 DEFAULT_CURSOR_WORKSPACE_ROOT = Path("/srv/hermes-cursor/workspaces")
+
+logger = logging.getLogger(__name__)
 
 _SECRET_ENV_MARKERS = ("KEY", "TOKEN", "SECRET", "PASSWORD", "PASSWD", "CREDENTIAL")
 _ALLOWED_ENV_NAMES = {
@@ -47,6 +50,35 @@ _ALLOWED_ENV_NAMES = {
 
 class CursorSDKCallError(RuntimeError):
     """Raised internally for Cursor SDK failures that should trigger retry."""
+
+
+def _cursor_failure_message(metadata: dict[str, Any]) -> str:
+    error = metadata.get("error")
+    if isinstance(error, dict):
+        err_type = error.get("type") or metadata.get("error_type") or "CursorSDKError"
+        err_msg = error.get("message") or metadata.get("error_message") or metadata.get("raw_error") or "unknown"
+        return f"{err_type}: {err_msg}"
+    return str(metadata.get("raw_error") or metadata.get("error_message") or "unknown")
+
+
+def _log_cursor_sdk_failure(metadata: dict[str, Any]) -> None:
+    """Log structured Cursor SDK failure metadata before caller fallback can run."""
+    logger.warning(
+        "Cursor SDK call failed before fallback: status=%s sdk_status=%s error=%s "
+        "raw_error=%s timeout_seconds=%s latency_ms=%s retry_count=%s model=%s "
+        "run_id=%s agent_id=%s workspace=%s",
+        metadata.get("status"),
+        metadata.get("sdk_status"),
+        metadata.get("error"),
+        metadata.get("raw_error"),
+        metadata.get("timeout_seconds"),
+        metadata.get("latency_ms"),
+        metadata.get("retry_count"),
+        metadata.get("model_id"),
+        metadata.get("run_id"),
+        metadata.get("agent_id"),
+        metadata.get("workspace"),
+    )
 
 
 @contextmanager
@@ -233,6 +265,11 @@ def run_cursor_sdk_chat_completion(
             "run_id": None,
             "retry_count": attempt,
             "raw_error": None,
+            "error": None,
+            "error_type": None,
+            "error_message": None,
+            "sdk_status": None,
+            "timeout_seconds": timeout_seconds,
             "workspace": str(workspace),
         }
         try:
@@ -251,21 +288,31 @@ def run_cursor_sdk_chat_completion(
             metadata.update(
                 {
                     "status": status,
+                    "sdk_status": status,
                     "agent_id": getattr(result, "agent_id", None),
                     "run_id": getattr(result, "id", None) or getattr(result, "run_id", None),
                     "duration_ms": getattr(result, "duration_ms", None),
                 }
             )
-            if status != "finished" or not str(text).strip():
-                raise CursorSDKCallError(f"Cursor SDK returned status={status!r} with empty result")
+            if status == "finished" and not str(text).strip():
+                metadata["status"] = "empty_result"
+                raise CursorSDKCallError("Cursor SDK returned empty result")
+            if status != "finished":
+                raise CursorSDKCallError(f"Cursor SDK returned status={status!r}")
             metadata["latency_ms"] = int((time.monotonic() - started) * 1000)
             return _success_response(text=str(text).strip(), metadata=metadata)
         except concurrent.futures.TimeoutError:
             metadata["status"] = "timeout"
-            metadata["raw_error"] = f"Cursor SDK call exceeded {timeout_seconds:.1f}s timeout"
+            metadata["error_type"] = "TimeoutError"
+            metadata["error_message"] = f"Cursor SDK call exceeded {timeout_seconds:.1f}s timeout"
+            metadata["raw_error"] = metadata["error_message"]
+            metadata["error"] = {"type": "TimeoutError", "message": metadata["error_message"]}
         except Exception as exc:  # noqa: BLE001 - preserve raw SDK errors in metadata
             metadata["status"] = metadata.get("status") or "error"
+            metadata["error_type"] = exc.__class__.__name__
+            metadata["error_message"] = str(exc)
             metadata["raw_error"] = str(exc)
+            metadata["error"] = {"type": exc.__class__.__name__, "message": str(exc)}
         finally:
             metadata["latency_ms"] = int((time.monotonic() - attempt_started) * 1000)
             last_metadata = metadata
@@ -280,7 +327,18 @@ def run_cursor_sdk_chat_completion(
             "run_id": None,
             "retry_count": max_retries,
             "raw_error": "Cursor SDK call failed before execution",
+            "error": {"type": "CursorSDKCallError", "message": "Cursor SDK call failed before execution"},
+            "error_type": "CursorSDKCallError",
+            "error_message": "Cursor SDK call failed before execution",
+            "sdk_status": None,
+            "timeout_seconds": timeout_seconds,
             "workspace": str(workspace),
         }
     last_metadata["retry_count"] = max_retries
+    if last_metadata.get("error") is None:
+        last_metadata["error"] = {
+            "type": last_metadata.get("error_type") or "CursorSDKCallError",
+            "message": _cursor_failure_message(last_metadata),
+        }
+    _log_cursor_sdk_failure(last_metadata)
     return _failure_response(metadata=last_metadata)
