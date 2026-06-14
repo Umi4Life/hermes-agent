@@ -342,6 +342,9 @@ def _resolve_runtime_from_pool_entry(
     elif provider == "copilot":
         api_mode = _copilot_runtime_api_mode(model_cfg, getattr(entry, "runtime_api_key", ""))
         base_url = base_url or PROVIDER_REGISTRY["copilot"].inference_base_url
+    elif provider == "cursor-sdk":
+        api_mode = "cursor_sdk"
+        base_url = base_url or "cursor-sdk://local"
     elif provider == "azure-foundry":
         # Azure Foundry: read api_mode and base_url from config
         cfg_provider = str(model_cfg.get("provider") or "").strip().lower()
@@ -1175,6 +1178,12 @@ def _resolve_explicit_runtime(
             explicit_api_key=explicit_api_key,
             explicit_base_url=explicit_base_url,
         )
+
+    if provider == "cursor-sdk":
+        # Let the dedicated cursor-sdk runtime block set api_mode=cursor_sdk
+        # and Cursor-specific request_overrides instead of treating the
+        # sentinel base URL as a generic OpenAI-compatible endpoint.
+        return None
 
     pconfig = PROVIDER_REGISTRY.get(provider)
     if pconfig and pconfig.auth_type == "api_key":
