@@ -1122,15 +1122,31 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
         # (not substring) — see GHSA-76xc-57q6-vm5m.
         if fb_base_url_hint and base_url_host_matches(fb_base_url_hint, "ollama.com") and not fb_api_key_hint:
             fb_api_key_hint = os.getenv("OLLAMA_API_KEY") or None
-        fb_client, _resolved_fb_model = resolve_provider_client(
-            fb_provider, model=fb_model, raw_codex=True,
-            explicit_base_url=fb_base_url_hint,
-            explicit_api_key=fb_api_key_hint)
-        if fb_client is None:
-            logger.warning(
-                "Fallback to %s failed: provider not configured",
-                fb_provider)
-            return agent._try_activate_fallback()  # try next in chain
+        fb_client = None
+        if fb_provider == "cursor-sdk":
+            from hermes_cli.auth import resolve_api_key_provider_credentials
+
+            _cursor_creds = resolve_api_key_provider_credentials("cursor-sdk")
+            fb_api_key_hint = (fb_api_key_hint or _cursor_creds.get("api_key") or "").strip() or None
+            fb_base_url_hint = (
+                fb_base_url_hint
+                or (_cursor_creds.get("base_url") or "cursor-sdk://local").rstrip("/")
+            )
+            if not fb_api_key_hint:
+                logger.warning(
+                    "Fallback to cursor-sdk failed: CURSOR_API_KEY not configured",
+                )
+                return agent._try_activate_fallback()
+        else:
+            fb_client, _resolved_fb_model = resolve_provider_client(
+                fb_provider, model=fb_model, raw_codex=True,
+                explicit_base_url=fb_base_url_hint,
+                explicit_api_key=fb_api_key_hint)
+            if fb_client is None:
+                logger.warning(
+                    "Fallback to %s failed: provider not configured",
+                    fb_provider)
+                return agent._try_activate_fallback()  # try next in chain
         try:
             from hermes_cli.model_normalize import normalize_model_for_provider
 
@@ -1143,7 +1159,11 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
 
         # Determine api_mode from provider / base URL / model
         fb_api_mode = "chat_completions"
-        fb_base_url = str(fb_client.base_url)
+        if fb_provider == "cursor-sdk":
+            fb_api_mode = "cursor_sdk"
+            fb_base_url = fb_base_url_hint or "cursor-sdk://local"
+        else:
+            fb_base_url = str(fb_client.base_url)
         _fb_is_azure = agent._is_azure_openai_url(fb_base_url)
         if fb_provider == "openai-codex":
             fb_api_mode = "codex_responses"
@@ -1220,6 +1240,21 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
             agent._is_anthropic_oauth = _is_oauth_token(effective_key) if fb_provider == "anthropic" else False
             agent.client = None
             agent._client_kwargs = {}
+        elif fb_api_mode == "cursor_sdk":
+            agent.api_key = fb_api_key_hint or ""
+            agent.client = None
+            agent._client_kwargs = {}
+            agent.request_overrides = {
+                "cursor_model_id": fb_model or "composer-2.5",
+                "cursor_model_params": {"fast": "false"},
+                "cursor_workspace_root": os.getenv(
+                    "HERMES_CURSOR_WORKSPACE_ROOT", "/srv/hermes-cursor/workspaces",
+                ),
+                "cursor_timeout_seconds": float(
+                    os.getenv("HERMES_CURSOR_TIMEOUT_SECONDS", "90"),
+                ),
+                "cursor_max_retries": int(os.getenv("HERMES_CURSOR_MAX_RETRIES", "1")),
+            }
         else:
             # Swap OpenAI client and config in-place
             agent.api_key = fb_client.api_key
