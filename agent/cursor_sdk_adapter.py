@@ -32,7 +32,31 @@ _HERMES_CHAT_PREFIX = (
 
 logger = logging.getLogger(__name__)
 
-_SECRET_ENV_MARKERS = ("KEY", "TOKEN", "SECRET", "PASSWORD", "PASSWD", "CREDENTIAL")
+# cursor-sdk-bridge.js parseArgs() rejects flag values that start with "-".
+# secrets.token_urlsafe() can emit those (~1/64); bridge then exits before discovery.
+_BRIDGE_SECRET_ARGV_FLAGS = frozenset({
+    "--tool-callback-auth-token",
+    "--store-callback-auth-token",
+})
+_CURSOR_SDK_ENV_PREFIX = "CURSOR_SDK_"
+_CURSOR_ENV_PREFIX = "CURSOR_"
+_STRIP_ENV_EXACT = frozenset({
+    "OPENAI_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "OPENROUTER_API_KEY",
+    "GEMINI_API_KEY",
+    "GOOGLE_API_KEY",
+    "AZURE_OPENAI_API_KEY",
+    "OLLAMA_API_KEY",
+})
+_STRIP_ENV_SUFFIXES = (
+    "_API_KEY",
+    "_SECRET",
+    "_SECRET_KEY",
+    "_PASSWORD",
+    "_TOKEN",
+    "_CREDENTIAL",
+)
 _ALLOWED_ENV_NAMES = {
     "HOME",
     "PATH",
@@ -52,11 +76,82 @@ _ALLOWED_ENV_NAMES = {
     "HTTP_PROXY",
     "HTTPS_PROXY",
     "ALL_PROXY",
+    "CURSOR_API_KEY",
 }
+_CURSOR_SDK_RUNTIME_PATCHED = False
 
 
 class CursorSDKCallError(RuntimeError):
     """Raised internally for Cursor SDK failures that should trigger retry."""
+
+
+def _should_strip_env_var(key: str) -> bool:
+    upper = key.upper()
+    if upper.startswith("HERMES_"):
+        return True
+    if upper.startswith(_CURSOR_SDK_ENV_PREFIX) or upper.startswith(_CURSOR_ENV_PREFIX):
+        return False
+    if upper in _ALLOWED_ENV_NAMES:
+        return False
+    if upper in _STRIP_ENV_EXACT:
+        return True
+    return any(upper.endswith(suffix) for suffix in _STRIP_ENV_SUFFIXES)
+
+
+def _bridge_safe_auth_token(original: Callable[[], str]) -> Callable[[], str]:
+    def _generate() -> str:
+        for _ in range(16):
+            token = original()
+            if token and not token.startswith("-"):
+                return token
+        return f"h{original()}"
+
+    return _generate
+
+
+def _redact_bridge_argv(argv: list[str]) -> list[str]:
+    redacted: list[str] = []
+    secret_next = False
+    for arg in argv:
+        if secret_next:
+            redacted.append("<redacted>")
+            secret_next = False
+            continue
+        redacted.append(arg)
+        if arg in _BRIDGE_SECRET_ARGV_FLAGS:
+            secret_next = True
+    return redacted
+
+
+def _ensure_cursor_sdk_runtime_patches() -> None:
+    """Apply cursor-sdk workarounds once per process (bridge argv + auth tokens)."""
+    global _CURSOR_SDK_RUNTIME_PATCHED
+    if _CURSOR_SDK_RUNTIME_PATCHED:
+        return
+    try:
+        from cursor_sdk import _bridge as bridge_mod
+        from cursor_sdk import _store_callback as store_callback_mod
+        from cursor_sdk import _tool_callback as tool_callback_mod
+    except Exception:
+        return
+
+    store_callback_mod._new_auth_token = _bridge_safe_auth_token(store_callback_mod._new_auth_token)
+    tool_callback_mod._new_auth_token = _bridge_safe_auth_token(tool_callback_mod._new_auth_token)
+
+    original_popen = bridge_mod.subprocess.Popen
+
+    def _logged_bridge_popen(argv, *args, **kwargs):
+        if isinstance(argv, (list, tuple)) and any(
+            "cursor-sdk-bridge" in os.fspath(part) for part in argv
+        ):
+            logger.info(
+                "Cursor SDK bridge launch argv=%s",
+                _redact_bridge_argv([os.fspath(part) for part in argv]),
+            )
+        return original_popen(argv, *args, **kwargs)
+
+    bridge_mod.subprocess.Popen = _logged_bridge_popen  # type: ignore[method-assign]
+    _CURSOR_SDK_RUNTIME_PATCHED = True
 
 
 def _cursor_failure_message(metadata: dict[str, Any]) -> str:
@@ -149,25 +244,28 @@ def _log_cursor_sdk_timing(
 
 @contextmanager
 def _sanitized_cursor_environment(api_key: str):
-    """Temporarily expose only minimal non-Hermes environment to Cursor SDK."""
-    original = dict(os.environ)
-    sanitized: dict[str, str] = {}
-    for key, value in original.items():
-        upper = key.upper()
-        if upper.startswith("HERMES_"):
-            continue
-        if any(marker in upper for marker in _SECRET_ENV_MARKERS):
-            continue
-        if upper in _ALLOWED_ENV_NAMES:
-            sanitized[key] = value
-    sanitized["CURSOR_API_KEY"] = api_key
+    """Strip Hermes/provider secrets without clearing the full process environ.
+
+    Hermes must not wipe ``CURSOR_SDK_*`` vars or globally ``clear()`` os.environ:
+    cursor-sdk launches cursor-sdk-bridge as a subprocess that inherits the
+    current environ, and concurrent gateway turns share this process.
+    """
+    removed: dict[str, str] = {}
+    for key in list(os.environ):
+        if _should_strip_env_var(key):
+            value = os.environ.pop(key, None)
+            if value is not None:
+                removed[key] = value
+    previous_api_key = os.environ.get("CURSOR_API_KEY")
+    os.environ["CURSOR_API_KEY"] = api_key
     try:
-        os.environ.clear()
-        os.environ.update(sanitized)
         yield
     finally:
-        os.environ.clear()
-        os.environ.update(original)
+        os.environ.pop("CURSOR_API_KEY", None)
+        if previous_api_key is not None:
+            os.environ["CURSOR_API_KEY"] = previous_api_key
+        for key, value in removed.items():
+            os.environ[key] = value
 
 
 def _content_to_text(content: Any) -> str:
@@ -372,6 +470,7 @@ def _run_sdk_prompt_blocking(
         except Exception:
             pass
 
+        _ensure_cursor_sdk_runtime_patches()
         from cursor_sdk import Agent  # type: ignore[import-not-found]
 
         options = _build_agent_options(
@@ -437,6 +536,7 @@ def _run_sdk_prompt_streaming(
         except Exception:
             pass
 
+        _ensure_cursor_sdk_runtime_patches()
         from cursor_sdk import Agent  # type: ignore[import-not-found]
 
         options = _build_agent_options(

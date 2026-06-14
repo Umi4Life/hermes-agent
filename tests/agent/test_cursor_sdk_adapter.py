@@ -212,6 +212,8 @@ def test_cursor_sdk_sanitizes_hermes_secrets_from_sdk_process_environment(monkey
 
     monkeypatch.setenv("OPENAI_API_KEY", "sk-sho...leak")
     monkeypatch.setenv("HERMES_SECRET_THING", "should-not-leak")
+    monkeypatch.setenv("CURSOR_SDK_TOOL_CALLBACK_URL", "http://127.0.0.1:9999/")
+    monkeypatch.setenv("CURSOR_SDK_TOOL_CALLBACK_AUTH_TOKEN", "bridge-callback-token")
     monkeypatch.setenv("PATH", os.environ.get("PATH", ""))
     calls, _ = _install_fake_cursor_sdk(
         monkeypatch,
@@ -227,8 +229,57 @@ def test_cursor_sdk_sanitizes_hermes_secrets_from_sdk_process_environment(monkey
 
     sdk_env = calls[0][2]
     assert sdk_env.get("CURSOR_API_KEY") == "cursor-test-key"
+    assert sdk_env.get("CURSOR_SDK_TOOL_CALLBACK_URL") == "http://127.0.0.1:9999/"
+    assert sdk_env.get("CURSOR_SDK_TOOL_CALLBACK_AUTH_TOKEN") == "bridge-callback-token"
     assert "OPENAI_API_KEY" not in sdk_env
     assert "HERMES_SECRET_THING" not in sdk_env
+    assert sdk_env.get("PATH")
+
+
+def test_redact_bridge_argv_masks_callback_tokens():
+    from agent.cursor_sdk_adapter import _redact_bridge_argv
+
+    argv = [
+        "/path/cursor-sdk-bridge.js",
+        "--tool-callback-url",
+        "http://127.0.0.1:1234/",
+        "--tool-callback-auth-token",
+        "-looksLikeFlag",
+        "--store-callback-auth-token",
+        "secret-store-token",
+    ]
+    assert _redact_bridge_argv(argv) == [
+        "/path/cursor-sdk-bridge.js",
+        "--tool-callback-url",
+        "http://127.0.0.1:1234/",
+        "--tool-callback-auth-token",
+        "<redacted>",
+        "--store-callback-auth-token",
+        "<redacted>",
+    ]
+
+
+def test_bridge_safe_auth_token_never_starts_with_dash(monkeypatch):
+    from agent import cursor_sdk_adapter as adapter
+
+    calls = {"n": 0}
+
+    def fake_token():
+        calls["n"] += 1
+        return "-bad-token" if calls["n"] == 1 else "good-token"
+
+    safe = adapter._bridge_safe_auth_token(fake_token)
+    assert safe() == "good-token"
+
+
+def test_should_strip_env_preserves_cursor_sdk_vars():
+    from agent.cursor_sdk_adapter import _should_strip_env_var
+
+    assert _should_strip_env_var("HERMES_FOO") is True
+    assert _should_strip_env_var("OPENAI_API_KEY") is True
+    assert _should_strip_env_var("CURSOR_SDK_TOOL_CALLBACK_AUTH_TOKEN") is False
+    assert _should_strip_env_var("CURSOR_API_KEY") is False
+    assert _should_strip_env_var("PATH") is False
 
 
 def test_cursor_sdk_runtime_provider_resolves_selectable_non_default(monkeypatch):
