@@ -695,6 +695,17 @@ def init_agent(
         # Cursor SDK calls are executed by agent.cursor_sdk_adapter through
         # the cursor_sdk transport. Do not construct an OpenAI-wire client for
         # the sentinel cursor-sdk://local base URL.
+        effective_key = (api_key or "").strip()
+        if not effective_key:
+            try:
+                from hermes_cli.auth import resolve_api_key_provider_credentials
+
+                effective_key = (
+                    resolve_api_key_provider_credentials("cursor-sdk").get("api_key") or ""
+                ).strip()
+            except Exception:
+                effective_key = ""
+        agent.api_key = effective_key
         agent.client = None
         agent._client_kwargs = {}
         if not agent.quiet_mode:

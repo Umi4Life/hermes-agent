@@ -1484,7 +1484,17 @@ def switch_model(agent, new_model, new_provider, api_key='', base_url='', api_mo
             # Cursor SDK is a direct SDK adapter, not an OpenAI-compatible
             # HTTP endpoint. Keep the runtime fields but leave client creation
             # to the cursor_sdk transport path.
-            agent.api_key = api_key or agent.api_key
+            effective_key = (api_key or agent.api_key or "").strip()
+            if not effective_key:
+                try:
+                    from hermes_cli.auth import resolve_api_key_provider_credentials
+
+                    effective_key = (
+                        resolve_api_key_provider_credentials("cursor-sdk").get("api_key") or ""
+                    ).strip()
+                except Exception:
+                    effective_key = ""
+            agent.api_key = effective_key
             agent.client = None
             agent._client_kwargs = {}
         else:
