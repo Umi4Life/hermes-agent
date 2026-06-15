@@ -8940,6 +8940,21 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         logger.debug("trailing footer send failed: %s", _e)
                 return None
 
+            _delivery_msgs = agent_result.get("delivery_messages")
+            if isinstance(_delivery_msgs, list) and _delivery_msgs:
+                _del_adapter = self.adapters.get(source.platform)
+                _del_meta = self._thread_metadata_for_source(
+                    source, self._reply_anchor_for_event(event)
+                )
+                for _dm in _delivery_msgs:
+                    if _dm and _del_adapter:
+                        await _del_adapter.send(
+                            source.chat_id,
+                            str(_dm),
+                            metadata=_del_meta,
+                        )
+                return None
+
             return response
             
         except Exception as e:

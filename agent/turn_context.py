@@ -216,18 +216,27 @@ def build_turn_context(
             should_review_memory = True
             agent._turns_since_memory = 0
 
-    # Add user message.
-    user_msg = {"role": "user", "content": user_message}
-    messages.append(user_msg)
-    current_turn_user_idx = len(messages) - 1
-    agent._persist_user_message_idx = current_turn_user_idx
+    # Add user message (skip when cursor_sdk fallback replays the native loop).
+    if getattr(agent, "_cursor_fallback_replay", False):
+        agent._cursor_fallback_replay = False
+        current_turn_user_idx = len(messages) - 1
+        for idx in range(len(messages) - 1, -1, -1):
+            if messages[idx].get("role") == "user":
+                current_turn_user_idx = idx
+                break
+        agent._persist_user_message_idx = current_turn_user_idx
+    else:
+        user_msg = {"role": "user", "content": user_message}
+        messages.append(user_msg)
+        current_turn_user_idx = len(messages) - 1
+        agent._persist_user_message_idx = current_turn_user_idx
 
-    if not agent.quiet_mode:
-        _print_preview = summarize_user_message_for_log(user_message)
-        agent._safe_print(
-            f"💬 Starting conversation: '{_print_preview[:60]}"
-            f"{'...' if len(_print_preview) > 60 else ''}'"
-        )
+        if not agent.quiet_mode:
+            _print_preview = summarize_user_message_for_log(user_message)
+            agent._safe_print(
+                f"💬 Starting conversation: '{_print_preview[:60]}"
+                f"{'...' if len(_print_preview) > 60 else ''}'"
+            )
 
     # ── System prompt (cached per session for prefix caching) ──
     if agent._cached_system_prompt is None:

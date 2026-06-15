@@ -1739,6 +1739,19 @@ DEFAULT_CONFIG = {
         "provider": "",
     },
 
+    # Cursor SDK delegated runtime (provider: cursor-sdk).
+    "cursor_sdk": {
+        "runtime": "delegated",
+        "timeout_seconds": 180,
+        "max_retries": 1,
+        "cwd": None,
+        "local": True,
+        "inject_identity": True,
+        "identity_mode": "full",
+        "identity_max_chars": 4000,
+        "hermes_tools_mcp": True,
+    },
+
     # Subagent delegation — override the provider:model used by delegate_task
     # so child agents can run on a different (cheaper/faster) provider and model.
     # Uses the same runtime provider resolution as CLI/gateway startup, so all
@@ -2780,6 +2793,13 @@ OPTIONAL_ENV_VARS = {
         "password": False,
         "category": "provider",
         "advanced": True,
+    },
+    "CURSOR_API_KEY": {
+        "description": "Cursor API key for the cursor-sdk delegated runtime",
+        "prompt": "Cursor API key",
+        "url": "https://cursor.com/dashboard/integrations",
+        "password": True,
+        "category": "provider",
     },
     "DEEPSEEK_API_KEY": {
         "description": "DeepSeek API key for direct DeepSeek access",

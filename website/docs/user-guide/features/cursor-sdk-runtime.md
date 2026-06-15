@@ -1,0 +1,84 @@
+---
+title: Cursor SDK Runtime
+sidebar_label: Cursor SDK Runtime
+---
+
+# Cursor SDK Runtime
+
+Hermes can run turns through the [Cursor SDK](https://cursor.com/docs/sdk/python) (`cursor-sdk` Python package) when `model.provider` is `cursor-sdk`. Composer owns the tool loop locally against your configured working directory; Hermes exposes its richer tools (`web_search`, `browser_*`, skills, vision, etc.) via the same stdio MCP callback used by the Codex app-server runtime.
+
+## Enable
+
+```yaml
+model:
+  provider: cursor-sdk
+  default: composer-2.5
+
+providers:
+  cursor-sdk:
+    key_env: CURSOR_API_KEY
+
+cursor_sdk:
+  runtime: delegated
+  timeout_seconds: 180
+  hermes_tools_mcp: true
+  inject_identity: true
+  identity_mode: full   # full | compact | off
+
+fallback_providers:
+  - provider: openrouter
+    model: anthropic/claude-sonnet-4
+```
+
+Set `CURSOR_API_KEY` in `~/.hermes/.env` (Dashboard → Integrations).
+
+Install the optional package:
+
+```bash
+pip install 'hermes-agent[cursor-sdk]'
+```
+
+## What tools the model has
+
+### Cursor bridge (local `cwd`)
+
+Shell, read, grep, and patch-like edits against the working directory — Cursor's own agent tools.
+
+### Hermes MCP callback (`hermes_tools_mcp: true`)
+
+Same surface as [Codex app-server runtime](./codex-app-server-runtime.md#3-hermes-tool-callback-mcp-server-registered-in-codexconfigtoml): `web_search`, `web_extract`, `browser_*`, `vision_analyze`, `image_generate`, `skill_view`, `skills_list`, `text_to_speech`, and kanban worker tools when env-gated.
+
+Prefer Hermes MCP for web/browser when configured; use the Cursor bridge for fast cwd file operations.
+
+### Not available on this runtime
+
+`delegate_task`, `memory`, `session_search`, and `todo` require the Hermes agent loop. Use `fallback_providers` to switch to a native provider when you need them.
+
+## SOUL, `/personality`, and Discord
+
+Delegated runtimes do not receive Hermes' full system prompt stack. With `inject_identity: true`:
+
+- **`identity_mode: full`** (default) — injects `load_soul_md()` (same 20k cap as default Hermes) plus `/personality` (`ephemeral_system_prompt`) on `Agent.create`.
+- **`identity_mode: compact`** — head-truncated SOUL to `identity_max_chars` plus personality overlay.
+- **`identity_mode: off`** — Composer default voice only.
+
+Identity is injected on create (or on resume when the identity hash changes after `/personality` or SOUL edits). Changing personality clears the stored Cursor `agent_id` so the next turn starts fresh.
+
+## Errors and fallback
+
+When Cursor fails, Hermes sends **two Discord messages** when `fallback_providers` is configured:
+
+1. `⚠️ Cursor: …` — explicit error relay
+2. The fallback provider's answer on the native Hermes loop
+
+The fallback chain skips entries that duplicate the active `cursor-sdk` + model pair.
+
+## Session continuity
+
+`SessionDB.state_meta` stores `cursor_sdk.agent_id.<session_id>` for `Agent.resume()`. Inline MCP servers are re-passed on every resume (not persisted by the SDK).
+
+On startup failure, the stored id is cleared and the next turn calls `Agent.create` again.
+
+## Interrupt and restart
+
+`/stop` maps to `run.cancel()` when supported. Gateway restart with in-flight Cursor turns may need up to `timeout_seconds` (default 180s) to drain — use `/stop` or `/new` before restarting when possible.

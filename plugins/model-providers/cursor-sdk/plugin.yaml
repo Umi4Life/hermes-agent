@@ -1,0 +1,5 @@
+name: cursor-sdk
+kind: model-provider
+version: 1.0.0
+description: Cursor SDK delegated runtime (Composer via cursor-sdk Python package)
+author: Hermes Agent

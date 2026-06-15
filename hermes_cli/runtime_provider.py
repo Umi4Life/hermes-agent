@@ -248,6 +248,7 @@ _VALID_API_MODES = {
     # `model.openai_runtime == "codex_app_server"` AND provider in
     # {"openai", "openai-codex"}. Default is unchanged.
     "codex_app_server",
+    "cursor_sdk",
 }
 
 
@@ -318,6 +319,9 @@ def _resolve_runtime_from_pool_entry(
     elif provider == "google-gemini-cli":
         api_mode = "chat_completions"
         base_url = base_url or "cloudcode-pa://google"
+    elif provider in {"cursor-sdk", "cursor_sdk", "cursor"}:
+        api_mode = "cursor_sdk"
+        base_url = base_url or "cursor-sdk://local"
     elif provider == "minimax-oauth":
         # MiniMax OAuth tokens are valid only against the Anthropic Messages
         # compatible endpoint. Do not honor stale model.api_mode values from a
@@ -1201,6 +1205,20 @@ def _resolve_explicit_runtime(
             explicit_api_key=explicit_api_key,
             explicit_base_url=explicit_base_url,
         )
+
+    if provider in {"cursor-sdk", "cursor_sdk", "cursor"}:
+        api_key = (explicit_api_key or "").strip() or os.getenv("CURSOR_API_KEY", "").strip()
+        if not api_key:
+            creds = resolve_api_key_provider_credentials("cursor-sdk")
+            api_key = (creds.get("api_key") or "").strip()
+        return {
+            "provider": "cursor-sdk",
+            "api_mode": "cursor_sdk",
+            "base_url": "cursor-sdk://local",
+            "api_key": api_key,
+            "source": "explicit",
+            "requested_provider": requested_provider,
+        }
 
     pconfig = PROVIDER_REGISTRY.get(provider)
     if pconfig and pconfig.auth_type == "api_key":

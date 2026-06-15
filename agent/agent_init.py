@@ -311,7 +311,7 @@ def init_agent(
     agent.provider = provider_name or ""
     agent.acp_command = acp_command or command
     agent.acp_args = list(acp_args or args or [])
-    if api_mode in {"chat_completions", "codex_responses", "anthropic_messages", "bedrock_converse", "codex_app_server"}:
+    if api_mode in {"chat_completions", "codex_responses", "anthropic_messages", "bedrock_converse", "codex_app_server", "cursor_sdk"}:
         agent.api_mode = api_mode
     elif agent.provider == "openai-codex":
         agent.api_mode = "codex_responses"
@@ -695,6 +695,17 @@ def init_agent(
                     print("🔑 Using credentials: Microsoft Entra ID")
                 elif isinstance(effective_key, str) and len(effective_key) > 12:
                     print(f"🔑 Using token: {effective_key[:8]}...{effective_key[-4:]}")
+    elif agent.api_mode == "cursor_sdk":
+        agent.api_key = api_key or os.getenv("CURSOR_API_KEY", "")
+        agent.client = None
+        agent._client_kwargs = {}
+        if not agent.api_key:
+            raise RuntimeError(
+                "CURSOR_API_KEY is required for the cursor-sdk provider. "
+                "Set it in ~/.hermes/.env or run `hermes setup`."
+            )
+        if not agent.quiet_mode:
+            print(f"🤖 AI Agent initialized with model: {agent.model} (Cursor SDK delegated)")
     elif agent.api_mode == "bedrock_converse":
         # AWS Bedrock — uses boto3 directly, no OpenAI client needed.
         # Region is extracted from the base_url or defaults to us-east-1.
@@ -936,6 +947,19 @@ def init_agent(
         agent._fallback_chain = []
     agent._fallback_index = 0
     agent._fallback_activated = getattr(agent, "_fallback_activated", False)
+    if agent.api_mode == "cursor_sdk" or (agent.provider or "").strip().lower() in {
+        "cursor-sdk", "cursor_sdk", "cursor"
+    }:
+        _primary_provider = (agent.provider or "").strip().lower()
+        _primary_model = (agent.model or "").strip()
+        agent._fallback_chain = [
+            entry for entry in agent._fallback_chain
+            if not (
+                (entry.get("provider") or "").strip().lower()
+                in {"cursor-sdk", "cursor_sdk", "cursor"}
+                and (entry.get("model") or "").strip() == _primary_model
+            )
+        ]
     # Legacy attribute kept for backward compat (tests, external callers)
     agent._fallback_model = agent._fallback_chain[0] if agent._fallback_chain else None
     if agent._fallback_chain and not agent.quiet_mode:

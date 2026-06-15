@@ -458,6 +458,20 @@ def run_conversation(
             should_review_memory=_should_review_memory,
         )
 
+    if agent.api_mode == "cursor_sdk" and not getattr(agent, "_cursor_fallback_replay", False):
+        from agent.cursor_sdk_runtime import run_cursor_sdk_turn_with_fallback
+
+        return run_cursor_sdk_turn_with_fallback(
+            agent,
+            user_message=user_message,
+            original_user_message=original_user_message,
+            messages=messages,
+            effective_task_id=effective_task_id,
+            should_review_memory=_should_review_memory,
+            stream_callback=stream_callback,
+            run_conversation_fn=run_conversation,
+        )
+
     while (api_call_count < agent.max_iterations and agent.iteration_budget.remaining > 0) or agent._budget_grace_call:
         # Reset per-turn checkpoint dedup so each iteration can take one snapshot
         agent._checkpoint_mgr.new_turn()
