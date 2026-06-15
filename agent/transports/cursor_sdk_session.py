@@ -146,19 +146,6 @@ class CursorSDKSession:
             opts["mcp_servers"] = mcp_servers
         return AgentOptions(**opts)
 
-    def _build_create_kwargs(self, settings: dict[str, Any]) -> dict[str, Any]:
-        from cursor_sdk import LocalAgentOptions
-
-        create_kwargs: dict[str, Any] = {
-            "api_key": getattr(self._agent, "api_key", "") or "",
-            "model": build_cursor_model_selection(self._agent, settings),
-            "local": LocalAgentOptions(cwd=self._cwd),
-        }
-        mcp_servers = build_cursor_mcp_servers(settings)
-        if mcp_servers:
-            create_kwargs["mcp_servers"] = mcp_servers
-        return create_kwargs
-
     def _ensure_sdk_agent(self) -> None:
         if self._sdk_agent is not None:
             return
@@ -186,10 +173,10 @@ class CursorSDKSession:
             else:
                 from cursor_sdk import Agent
 
-                create_kwargs = self._build_create_kwargs(settings)
+                opts = self._build_agent_options()
                 if identity_prefix:
                     self._pending_identity_prefix = identity_prefix
-                cm = Agent.create(**create_kwargs)
+                cm = Agent.create(opts)
             self._sdk_agent_cm = cm
             self._sdk_agent = cm.__enter__()
             agent_id = str(getattr(self._sdk_agent, "agent_id", "") or stored_id)

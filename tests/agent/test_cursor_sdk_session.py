@@ -93,10 +93,10 @@ def test_run_turn_creates_agent_and_returns_text(cursor_agent):
 
 def test_run_turn_prepends_identity_on_first_send_not_agent_create(cursor_agent):
     fake_sdk = _FakeSdkAgent()
-    captured_create_kwargs: dict = {}
+    captured_options: list = []
 
-    def _capture_create(**kwargs):
-        captured_create_kwargs.update(kwargs)
+    def _capture_create(options):
+        captured_options.append(options)
         return _FakeAgentCM(fake_sdk)
 
     with (
@@ -115,9 +115,40 @@ def test_run_turn_prepends_identity_on_first_send_not_agent_create(cursor_agent)
         session = CursorSDKSession(cursor_agent)
         result = session.run_turn(user_input="ping")
 
-    assert "instructions" not in captured_create_kwargs
+    assert len(captured_options) == 1
+    opts = captured_options[0]
+    assert not isinstance(opts, dict) or "instructions" not in opts
     assert result.final_text.startswith("reply:You are Sky Feather.")
     assert "ping" in result.final_text
+
+
+def test_run_turn_create_uses_agent_options_for_mcp(cursor_agent):
+    fake_sdk = _FakeSdkAgent()
+    captured_options: list = []
+
+    def _capture_create(options):
+        captured_options.append(options)
+        return _FakeAgentCM(fake_sdk)
+
+    with (
+        patch("cursor_sdk.Agent.create", side_effect=_capture_create),
+        patch(
+            "agent.transports.cursor_sdk_session.build_cursor_mcp_servers",
+            return_value={"hermes-tools": {"command": "python", "args": ["-m", "mcp"]}},
+        ),
+    ):
+        from cursor_sdk import AgentOptions
+        from agent.transports.cursor_sdk_session import CursorSDKSession
+
+        session = CursorSDKSession(cursor_agent)
+        session.run_turn(user_input="ping")
+
+    assert len(captured_options) == 1
+    opts = captured_options[0]
+    assert isinstance(opts, AgentOptions)
+    assert opts.mcp_servers == {
+        "hermes-tools": {"command": "python", "args": ["-m", "mcp"]}
+    }
 
 
 def test_model_selection_defaults_to_standard(cursor_agent):
