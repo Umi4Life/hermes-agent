@@ -15,6 +15,7 @@ from typing import Any, Callable, Optional
 
 from hermes_cli.cursor_sdk_config import (
     build_cursor_mcp_servers,
+    build_cursor_model_selection,
     build_identity_prefix,
     compute_identity_hash,
     cursor_sdk_agent_meta_key,
@@ -135,7 +136,7 @@ class CursorSDKSession:
         mcp_servers = build_cursor_mcp_servers(settings)
         opts: dict[str, Any] = {
             "api_key": getattr(self._agent, "api_key", "") or "",
-            "model": getattr(self._agent, "model", "") or "composer-2.5",
+            "model": build_cursor_model_selection(self._agent, settings),
             "local": LocalAgentOptions(cwd=self._cwd),
         }
         if instructions:
@@ -173,7 +174,7 @@ class CursorSDKSession:
 
                 create_kwargs: dict[str, Any] = {
                     "api_key": getattr(self._agent, "api_key", "") or "",
-                    "model": getattr(self._agent, "model", "") or "composer-2.5",
+                    "model": build_cursor_model_selection(self._agent, settings),
                     "local": LocalAgentOptions(cwd=self._cwd),
                 }
                 if identity_prefix:

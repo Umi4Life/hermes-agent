@@ -1746,6 +1746,8 @@ DEFAULT_CONFIG = {
         "max_retries": 1,
         "cwd": None,
         "local": True,
+        # Composer 2.5 variant: false = standard (default, cheaper); true = fast tier.
+        "fast": False,
         "inject_identity": True,
         "identity_mode": "full",
         "identity_max_chars": 4000,

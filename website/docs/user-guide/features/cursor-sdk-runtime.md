@@ -21,6 +21,7 @@ providers:
 cursor_sdk:
   runtime: delegated
   timeout_seconds: 180
+  fast: false            # false = standard (default, cheaper); true = fast tier
   hermes_tools_mcp: true
   inject_identity: true
   identity_mode: full   # full | compact | off
@@ -53,6 +54,12 @@ Prefer Hermes MCP for web/browser when configured; use the Cursor bridge for fas
 ### Not available on this runtime
 
 `delegate_task`, `memory`, `session_search`, and `todo` require the Hermes agent loop. Use `fallback_providers` to switch to a native provider when you need them.
+
+## Composer 2.5: standard vs fast
+
+`composer-2.5` is one model with a latency/cost toggle. Hermes defaults to **standard** (`cursor_sdk.fast: false`) — cheaper per token, better for gateway/agent loops. Set `fast: true` for lower latency at higher cost (Cursor IDE's interactive default).
+
+Changing `fast` rotates the stored Cursor `agent_id` on the next turn (included in the identity hash).
 
 ## SOUL, `/personality`, and Discord
 

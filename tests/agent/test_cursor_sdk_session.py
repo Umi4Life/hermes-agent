@@ -91,6 +91,26 @@ def test_run_turn_creates_agent_and_returns_text(cursor_agent):
     cursor_agent._session_db.set_meta.assert_called()
 
 
+def test_model_selection_defaults_to_standard(cursor_agent):
+    from hermes_cli.cursor_sdk_config import build_cursor_model_selection
+
+    sel = build_cursor_model_selection(cursor_agent)
+    assert sel == {
+        "id": "composer-2.5",
+        "params": [{"id": "fast", "value": "false"}],
+    }
+
+
+def test_model_selection_fast_when_configured(cursor_agent):
+    from hermes_cli.cursor_sdk_config import build_cursor_model_selection
+
+    sel = build_cursor_model_selection(
+        cursor_agent,
+        {"fast": True, "runtime": "delegated"},
+    )
+    assert sel["params"] == [{"id": "fast", "value": "true"}]
+
+
 def test_mcp_entry_matches_codex_helper():
     from hermes_cli.codex_runtime_plugin_migration import _build_hermes_tools_mcp_entry
     from hermes_cli.cursor_sdk_config import build_hermes_tools_mcp_entry

@@ -18,6 +18,9 @@ _DEFAULT_CURSOR_SDK: Dict[str, Any] = {
     "max_retries": 1,
     "cwd": None,
     "local": True,
+    # Composer 2.5 fast toggle — false = standard (cheaper); true = low-latency fast tier.
+    # Hermes defaults to standard; Cursor IDE defaults to fast when unset on their side.
+    "fast": False,
     "inject_identity": True,
     "identity_mode": "full",
     "identity_max_chars": 4000,
@@ -34,6 +37,20 @@ def get_cursor_sdk_settings(config: Optional[dict] = None) -> dict[str, Any]:
     out = dict(_DEFAULT_CURSOR_SDK)
     out.update(raw)
     return out
+
+
+def build_cursor_model_selection(
+    agent,
+    settings: Optional[dict] = None,
+) -> dict[str, Any]:
+    """Build Cursor SDK model selection with explicit fast/standard param."""
+    settings = settings or get_cursor_sdk_settings()
+    model_id = (getattr(agent, "model", "") or "composer-2.5").strip()
+    use_fast = bool(settings.get("fast", False))
+    return {
+        "id": model_id,
+        "params": [{"id": "fast", "value": "true" if use_fast else "false"}],
+    }
 
 
 def resolve_cursor_sdk_cwd(agent, settings: Optional[dict] = None) -> str:
@@ -84,8 +101,9 @@ def compute_identity_hash(agent, settings: Optional[dict] = None) -> str:
     settings = settings or get_cursor_sdk_settings()
     ephemeral = str(getattr(agent, "ephemeral_system_prompt", "") or "")
     mode = str(settings.get("identity_mode", "full"))
+    use_fast = bool(settings.get("fast", False))
     digest = hashlib.sha256(
-        f"{mode}|{_soul_mtime()}|{ephemeral}".encode("utf-8")
+        f"{mode}|{_soul_mtime()}|{ephemeral}|fast={use_fast}".encode("utf-8")
     ).hexdigest()[:16]
     return digest
 
