@@ -41,8 +41,10 @@ class _FakeSdkAgent:
     def __init__(self) -> None:
         self.agent_id = "local-agent-123"
         self._runs: list[_FakeRun] = []
+        self._send_options: list = []
 
-    def send(self, prompt: str) -> _FakeRun:
+    def send(self, prompt: str, options=None) -> _FakeRun:
+        self._send_options.append(options)
         run = _FakeRun(f"reply:{prompt}")
         self._runs.append(run)
         return run
@@ -60,6 +62,23 @@ class _FakeAgentCM:
 
     def __exit__(self, *args) -> None:
         return None
+
+
+@pytest.fixture(autouse=True)
+def _implicit_bridge():
+    """Default every test to the implicit-bridge path (no owned client).
+
+    Stubbing ``_acquire_client`` to ``(None, 0)`` means ``Agent.create`` is
+    called with the same ``(options)`` signature the existing mocks expect and
+    no real ``launch_bridge`` subprocess is spawned.  Tests that exercise the
+    owned bridge re-patch ``_acquire_client`` themselves; the bridge-manager
+    tests drive ``cursor_bridge_manager`` directly and are untouched by this.
+    """
+    with patch(
+        "agent.transports.cursor_sdk_session.CursorSDKSession._acquire_client",
+        return_value=(None, 0),
+    ):
+        yield
 
 
 @pytest.fixture
@@ -85,7 +104,14 @@ def cursor_agent(tmp_path, monkeypatch):
 def test_run_turn_creates_agent_and_returns_text(cursor_agent):
     fake_sdk = _FakeSdkAgent()
 
-    with patch("cursor_sdk.Agent.create", return_value=_FakeAgentCM(fake_sdk)):
+    with (
+        patch("cursor_sdk.Agent.create", return_value=_FakeAgentCM(fake_sdk)),
+        # Hermetic: don't inject the ambient SOUL/identity (it varies by host).
+        patch(
+            "agent.transports.cursor_sdk_session.build_identity_prefix",
+            return_value="",
+        ),
+    ):
         from agent.transports.cursor_sdk_session import CursorSDKSession
 
         session = CursorSDKSession(cursor_agent)
@@ -162,29 +188,31 @@ def test_run_turn_create_uses_agent_options_for_mcp(cursor_agent):
 
 
 def test_run_turn_retries_transient_wait_failure(cursor_agent):
-    class _FlakyRun(_FakeRun):
-        def __init__(self, prompt: str) -> None:
-            super().__init__(f"reply:{prompt}")
-            self._attempt = 0
+    """A transient wait failure is retried: the retry recreates the agent and
+    sends a fresh run, which succeeds (modeling the blip having cleared)."""
 
+    class _FailingRun(_FakeRun):
         def wait(self):
-            self._attempt += 1
-            if self._attempt == 1:
-                raise RuntimeError(
-                    "Bridge request failed: RemoteProtocolError: peer closed connection"
-                )
-            return super().wait()
+            raise RuntimeError(
+                "Bridge request failed: RemoteProtocolError: peer closed connection"
+            )
 
     fake_sdk = _FakeSdkAgent()
     create_calls = {"n": 0}
+    send_calls = {"n": 0}
 
     def _capture_create(options):
         create_calls["n"] += 1
         return _FakeAgentCM(fake_sdk)
 
-    def flaky_send(self, prompt: str):
-        run = _FlakyRun(prompt)
+    def flaky_send(self, prompt: str, options=None):
+        send_calls["n"] += 1
+        # First send's run fails on wait (transient); the retry's send is healthy.
+        run = _FailingRun(f"reply:{prompt}") if send_calls["n"] == 1 else _FakeRun(
+            f"reply:{prompt}"
+        )
         self._runs.append(run)
+        self._send_options.append(options)
         return run
 
     with (
@@ -211,6 +239,8 @@ def test_run_turn_retries_transient_wait_failure(cursor_agent):
     assert result.error is None
     assert result.final_text == "reply:ping"
     assert create_calls["n"] == 2
+    # The retried send force-expires any stuck prior run.
+    assert fake_sdk._send_options[-1] == {"local": {"force": True}}
 
 
 def test_run_turn_connection_refused_on_retry_does_not_retry_again(cursor_agent):
@@ -229,7 +259,7 @@ def test_run_turn_connection_refused_on_retry_does_not_retry_again(cursor_agent)
             return _FakeAgentCM(fake_sdk)
         raise RuntimeError("Bridge request failed: ConnectError: [Errno 111] Connection refused")
 
-    def flaky_send(self, prompt: str):
+    def flaky_send(self, prompt: str, options=None):
         run = _FlakyRun(f"reply:{prompt}")
         self._runs.append(run)
         return run
@@ -256,7 +286,9 @@ def test_run_turn_connection_refused_on_retry_does_not_retry_again(cursor_agent)
         result = session.run_turn(user_input="ping")
 
     assert create_calls["n"] == 2
+    # Connection-refused is bridge-down, not a plain transient.
     assert result.transient_error is False
+    assert result.bridge_down is True
     assert "bridge unavailable" in (result.error or "").lower()
 
 
@@ -269,7 +301,7 @@ def test_run_turn_status_error_retires_and_clears_persisted_agent(cursor_agent):
         create_calls["n"] += 1
         return _FakeAgentCM(fake_sdk)
 
-    def alternating_send(self, prompt: str):
+    def alternating_send(self, prompt: str, options=None):
         send_calls["n"] += 1
         if send_calls["n"] == 1:
             return _FakeRun(f"reply:{prompt}", status="error")
@@ -637,7 +669,7 @@ def test_failed_turn_does_not_increment_turn_count(cursor_agent):
 
     fake_sdk = _FakeSdkAgent()
 
-    def _send(prompt: str):
+    def _send(prompt: str, options=None):
         run = _ErrorRun(f"reply:{prompt}")
         fake_sdk._runs.append(run)
         return run
@@ -665,3 +697,269 @@ def test_failed_turn_does_not_increment_turn_count(cursor_agent):
 
     assert result.error
     assert meta_store.get("cursor_sdk.turn_count.sess-1") in (None, "0")
+
+
+# ── Exception classification ────────────────────────────────────────────────
+
+
+def test_classify_bridge_down_transient_and_retry_after():
+    from agent.transports.cursor_sdk_session import _classify_cursor_exception
+
+    bridge = _classify_cursor_exception(
+        RuntimeError("ConnectError: [Errno 111] Connection refused")
+    )
+    assert bridge.is_bridge_down is True
+    assert bridge.is_transient is False
+    assert bridge.fail_fast is False
+
+    transient = _classify_cursor_exception(
+        RuntimeError("RemoteProtocolError: peer closed connection")
+    )
+    assert transient.is_transient is True
+    assert transient.is_bridge_down is False
+
+    class _Retryable(Exception):
+        is_retryable = True
+        retry_after = "2.5"
+
+    retryable = _classify_cursor_exception(_Retryable("slow down"))
+    assert retryable.is_transient is True
+    assert retryable.retry_after == 2.5
+
+
+def test_classify_typed_fail_fast():
+    from agent.transports.cursor_sdk_session import _classify_cursor_exception
+
+    try:
+        from cursor_sdk.errors import AuthenticationError
+    except Exception:
+        pytest.skip("cursor_sdk not installed")
+    try:
+        exc = AuthenticationError("invalid api key")
+    except Exception:
+        pytest.skip("AuthenticationError constructor differs")
+
+    info = _classify_cursor_exception(exc)
+    assert info.fail_fast is True
+    assert info.is_cursor is True
+    assert info.is_transient is False
+
+
+def test_fail_fast_error_is_not_retried(cursor_agent):
+    from agent.transports import cursor_sdk_session as mod
+
+    fake_sdk = _FakeSdkAgent()
+    create_calls = {"n": 0}
+
+    def _capture_create(options):
+        create_calls["n"] += 1
+        return _FakeAgentCM(fake_sdk)
+
+    class _Boom(_FakeRun):
+        def wait(self):
+            raise RuntimeError("permanent: malformed request")
+
+    def _send(self, prompt, options=None):
+        run = _Boom(f"reply:{prompt}")
+        self._runs.append(run)
+        return run
+
+    real_classify = mod._classify_cursor_exception
+
+    def _classify(exc):
+        info = real_classify(exc)
+        if "malformed" in str(exc):
+            info.fail_fast = True
+            info.is_cursor = True
+            info.is_transient = False
+        return info
+
+    with (
+        patch("cursor_sdk.Agent.create", side_effect=_capture_create),
+        patch.object(_FakeSdkAgent, "send", _send),
+        patch.object(mod, "_classify_cursor_exception", _classify),
+        patch(
+            "agent.transports.cursor_sdk_session.get_cursor_sdk_settings",
+            return_value={
+                "timeout_seconds": 180,
+                "max_retries": 2,
+                "retry_backoff_seconds": 0,
+                "hermes_tools_mcp": False,
+                "inject_identity": False,
+            },
+        ),
+    ):
+        session = mod.CursorSDKSession(cursor_agent)
+        result = session.run_turn(user_input="ping")
+
+    assert result.fail_fast is True
+    assert result.error
+    assert create_calls["n"] == 1  # no retry on a permanent error
+
+
+# ── Owned bridge: relaunch + resume force ───────────────────────────────────
+
+
+def test_bridge_down_relaunches_then_succeeds(cursor_agent):
+    from agent.transports.cursor_sdk_session import CursorSDKSession
+
+    fake_sdk = _FakeSdkAgent()
+    create_calls = {"n": 0}
+    send_calls = {"n": 0}
+    relaunch_calls = {"n": 0}
+
+    class _BridgeDownRun(_FakeRun):
+        def wait(self):
+            raise RuntimeError(
+                "Bridge request failed: ConnectError: [Errno 111] Connection refused"
+            )
+
+    def _capture_create(options, client=None):
+        create_calls["n"] += 1
+        return _FakeAgentCM(fake_sdk)
+
+    def _send(self, prompt, options=None):
+        send_calls["n"] += 1
+        run = (
+            _BridgeDownRun(f"reply:{prompt}")
+            if send_calls["n"] == 1
+            else _FakeRun(f"reply:{prompt}")
+        )
+        self._runs.append(run)
+        self._send_options.append(options)
+        return run
+
+    def _relaunch(cwd, gen, **kwargs):
+        relaunch_calls["n"] += 1
+        return ("client-gen2", 2)
+
+    with (
+        patch("cursor_sdk.Agent.create", side_effect=_capture_create),
+        patch.object(_FakeSdkAgent, "send", _send),
+        # Owned bridge present: hand back a fake client + generation.
+        patch.object(CursorSDKSession, "_acquire_client", return_value=("client-gen1", 1)),
+        patch(
+            "agent.transports.cursor_sdk_session.cursor_bridge_manager.relaunch",
+            side_effect=_relaunch,
+        ),
+        patch(
+            "agent.transports.cursor_sdk_session.get_cursor_sdk_settings",
+            return_value={
+                "timeout_seconds": 180,
+                "max_retries": 2,
+                "retry_backoff_seconds": 0,
+                "own_bridge": True,
+                "hermes_tools_mcp": False,
+                "inject_identity": False,
+            },
+        ),
+    ):
+        session = CursorSDKSession(cursor_agent)
+        result = session.run_turn(user_input="ping")
+
+    assert result.error is None
+    assert result.final_text == "reply:ping"
+    assert relaunch_calls["n"] == 1
+    assert create_calls["n"] == 2
+    # Owned client is threaded into Agent.create.
+    assert fake_sdk._send_options[-1] == {"local": {"force": True}}
+
+
+def test_resume_forces_stuck_run_expiry(cursor_agent):
+    from agent.transports.cursor_sdk_session import CursorSDKSession
+
+    fake_sdk = _FakeSdkAgent()
+    meta = {
+        "cursor_sdk.agent_id.sess-1": "stored-agent",
+        "cursor_sdk.identity_hash.sess-1": "h1",
+    }
+    cursor_agent._session_db.get_meta.side_effect = lambda k: meta.get(k)
+    captured = {}
+
+    def _resume(agent_id, options, client=None):
+        captured["agent_id"] = agent_id
+        return _FakeAgentCM(fake_sdk)
+
+    with (
+        patch("cursor_sdk.Agent.resume", side_effect=_resume),
+        patch("cursor_sdk.Agent.create") as create_mock,
+        patch(
+            "agent.transports.cursor_sdk_session.compute_identity_hash",
+            return_value="h1",
+        ),
+        patch(
+            "agent.transports.cursor_sdk_session.get_cursor_sdk_settings",
+            return_value={
+                "timeout_seconds": 180,
+                "max_retries": 0,
+                "max_turns_per_agent": 0,
+                "max_agent_age_seconds": 0,
+                "hermes_tools_mcp": False,
+                "inject_identity": False,
+            },
+        ),
+    ):
+        session = CursorSDKSession(cursor_agent)
+        session.run_turn(user_input="ping")
+
+    create_mock.assert_not_called()
+    assert captured["agent_id"] == "stored-agent"
+    assert fake_sdk._send_options[-1] == {"local": {"force": True}}
+
+
+# ── Bridge manager pool / generation guard ──────────────────────────────────
+
+
+def test_bridge_manager_get_client_falls_back_on_launch_failure(monkeypatch):
+    from agent.transports import cursor_bridge_manager as mgr
+
+    monkeypatch.setattr(mgr, "_bridges", {})
+
+    def _boom(cwd, max_retries):
+        raise RuntimeError("no bridge available")
+
+    monkeypatch.setattr(mgr, "_launch", _boom)
+    client, gen = mgr.get_client("/tmp/ws-a")
+    assert client is None
+    assert gen == 0
+
+
+def test_bridge_manager_relaunch_without_owned_bridge_is_noop(monkeypatch):
+    from agent.transports import cursor_bridge_manager as mgr
+
+    monkeypatch.setattr(mgr, "_bridges", {})
+    client, gen = mgr.relaunch("/tmp/ws-b", 1)
+    assert client is None
+    assert gen == 0
+
+
+def test_bridge_manager_relaunch_generation_guard(monkeypatch):
+    from agent.transports import cursor_bridge_manager as mgr
+
+    class _Client:
+        def with_options(self, **kwargs):
+            return self
+
+    launches = {"n": 0}
+
+    def _fake_launch(cwd, max_retries):
+        launches["n"] += 1
+        cm = SimpleNamespace(__exit__=lambda *a: None)
+        return cm, _Client()
+
+    monkeypatch.setattr(mgr, "_bridges", {})
+    monkeypatch.setattr(mgr, "_launch", _fake_launch)
+
+    _, gen1 = mgr.get_client("/ws")
+    assert gen1 == 1 and launches["n"] == 1
+
+    # Stale observed generation → another thread already relaunched → no-op.
+    _, gen_stale = mgr.relaunch("/ws", 0)
+    assert gen_stale == 1 and launches["n"] == 1
+
+    # Current observed generation → real relaunch, generation bumps.
+    _, gen_new = mgr.relaunch("/ws", 1)
+    assert gen_new == 2 and launches["n"] == 2
+
+    mgr.shutdown_all()
+    assert mgr._bridges == {}

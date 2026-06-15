@@ -14,9 +14,25 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_CURSOR_SDK: Dict[str, Any] = {
     "runtime": "delegated",
+    # Total wall-clock budget for one turn (secondary deadline guard).
     "timeout_seconds": 180,
-    "max_retries": 1,
+    "max_retries": 2,
     "retry_backoff_seconds": 5,
+    # Cap on exponential backoff between retries.
+    "retry_backoff_cap_seconds": 30,
+    # Own the Cursor bridge (CursorClient.launch_bridge) instead of relying on
+    # the SDK's implicit, process-wide bridge.  This is what lets us set the
+    # request/stream timeouts below and relaunch a dead bridge in-turn.
+    "own_bridge": True,
+    # Bounds a single hung bridge request (distinct from the total
+    # ``timeout_seconds`` budget) so ``run.wait()`` can't block indefinitely.
+    "client_unary_timeout_seconds": 90,
+    # Bounds gaps between streamed ``iter_text()`` chunks.
+    "client_stream_timeout_seconds": 120,
+    # Transport-level retry budget applied to the owned client.
+    "client_max_retries": 2,
+    # Max concurrent owned bridges (one per distinct workspace cwd, LRU-evicted).
+    "bridge_pool_max": 4,
     "cwd": None,
     "local": True,
     # Composer 2.5 fast toggle — false = standard (cheaper); true = low-latency fast tier.
