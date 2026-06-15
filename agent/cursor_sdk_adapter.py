@@ -29,6 +29,16 @@ _HERMES_CHAT_PREFIX = (
     "[HERMES CHAT] Reply directly. Do not browse files or run tools unless "
     "the user explicitly asks."
 )
+_PERSONALITY_DELIVERY_MARKERS: tuple[tuple[str, str], ...] = (
+    ("Delivery style: Sumeragi Setsuna", "setsuna"),
+    ("Delivery style: Aihara Tsubaki", "tsubaki"),
+    ("Delivery style: Suzushima Arisu", "arisu"),
+    ("Delivery style: Ousaka Akane", "akane"),
+    ("Delivery style: Kujo Kaede", "kaede"),
+    ("Delivery style: Inohara Koboshi", "koboshi"),
+    ("Delivery style: Sky Feather", "sky-feather"),
+)
+_SLIM_PERSONALITY_MAX_CHARS = 8000
 
 logger = logging.getLogger(__name__)
 
@@ -316,6 +326,56 @@ def _is_tool_only_assistant(msg: dict[str, Any]) -> bool:
     return not text and bool(msg.get("tool_calls"))
 
 
+def _extract_system_content(messages: Iterable[dict[str, Any]]) -> str:
+    for msg in messages or []:
+        if not isinstance(msg, dict):
+            continue
+        if str(msg.get("role") or "") == "system":
+            return _content_to_text(msg.get("content")).strip()
+    return ""
+
+
+def _detect_personality_key(system_text: str) -> str:
+    for marker, key in _PERSONALITY_DELIVERY_MARKERS:
+        if marker in system_text:
+            return key
+    return "sky-feather"
+
+
+def _hermes_home() -> Path:
+    return Path(os.getenv("HERMES_HOME", Path.home() / ".hermes")).expanduser()
+
+
+def _load_cursor_slim_personality(*, system_text: str = "") -> str:
+    override = os.getenv("HERMES_CURSOR_SLIM_PERSONALITY", "").strip()
+    if override:
+        path = Path(override).expanduser()
+        if path.is_file():
+            text = path.read_text(encoding="utf-8").strip()
+            if text:
+                return text[:_SLIM_PERSONALITY_MAX_CHARS]
+
+    key = _detect_personality_key(system_text)
+    slim_dir = _hermes_home() / "sky-feather" / "cursor-slim"
+    for candidate in (
+        slim_dir / f"{key}.md",
+        slim_dir / "default.md",
+        slim_dir / "sky-feather.md",
+    ):
+        if candidate.is_file():
+            text = candidate.read_text(encoding="utf-8").strip()
+            if text:
+                return text[:_SLIM_PERSONALITY_MAX_CHARS]
+    return ""
+
+
+def _build_slim_prompt_prefix(*, system_text: str) -> str:
+    personality = _load_cursor_slim_personality(system_text=system_text)
+    if personality:
+        return f"{_HERMES_CHAT_PREFIX}\n\n{personality}"
+    return _HERMES_CHAT_PREFIX
+
+
 def _build_cursor_prompt(
     messages: Iterable[dict[str, Any]],
     *,
@@ -354,7 +414,9 @@ def _build_cursor_prompt(
         prompt_body = prompt_body[-8000:]
     if not prompt_body:
         return ""
-    return f"{_HERMES_CHAT_PREFIX}\n\n{prompt_body}"
+    system_text = _extract_system_content(msg_list)
+    prefix = _build_slim_prompt_prefix(system_text=system_text)
+    return f"{prefix}\n\n{prompt_body}"
 
 
 def _normalize_cursor_mode(cursor_mode: str) -> str:

@@ -493,6 +493,83 @@ def test_cursor_sdk_slim_prompt_omits_system_and_tools(monkeypatch, tmp_path):
     assert "Reply exactly pong" in prompt
 
 
+def test_cursor_sdk_slim_prompt_injects_cursor_slim_personality(monkeypatch, tmp_path):
+    from agent.cursor_sdk_adapter import run_cursor_sdk_chat_completion
+
+    hermes_home = tmp_path / "hermes"
+    slim_dir = hermes_home / "sky-feather" / "cursor-slim"
+    slim_dir.mkdir(parents=True)
+    (slim_dir / "sky-feather.md").write_text(
+        "[CHARACTER — Sky Feather]\n"
+        "## Voice Lines\n"
+        "| **おや？** | `Oya?` | debug |\n"
+        "| **よし！** | `Yoshi!` | success |\n"
+        "Yoshi! on success. Oya? on failure.\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+    calls, _ = _install_fake_cursor_sdk(
+        monkeypatch,
+        lambda prompt, options, calls: _FakeAgentResult(result="pong"),
+    )
+
+    run_cursor_sdk_chat_completion(
+        messages=[
+            {
+                "role": "system",
+                "content": "You are Hermes\nDelivery style: Sky Feather — follow the profile.",
+            },
+            {"role": "user", "content": "Reply exactly pong"},
+        ],
+        api_key="cursor-test-key",
+        workspace_root=tmp_path,
+        prompt_mode="slim",
+        timeout_seconds=5,
+    )
+
+    prompt = calls[0][0]
+    assert "Yoshi! on success" in prompt
+    assert "おや？" in prompt
+    assert "You are Hermes" not in prompt
+    assert "Reply exactly pong" in prompt
+
+
+def test_cursor_sdk_slim_prompt_selects_personality_by_delivery_style(monkeypatch, tmp_path):
+    from agent.cursor_sdk_adapter import run_cursor_sdk_chat_completion
+
+    hermes_home = tmp_path / "hermes"
+    slim_dir = hermes_home / "sky-feather" / "cursor-slim"
+    slim_dir.mkdir(parents=True)
+    (slim_dir / "setsuna.md").write_text(
+        "[CHARACTER — Architect Mode]\nCheckmate after evidence.\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+    calls, _ = _install_fake_cursor_sdk(
+        monkeypatch,
+        lambda prompt, options, calls: _FakeAgentResult(result="pong"),
+    )
+
+    run_cursor_sdk_chat_completion(
+        messages=[
+            {
+                "role": "system",
+                "content": "Delivery style: Sumeragi Setsuna — follow the profile.",
+            },
+            {"role": "user", "content": "Reply exactly pong"},
+        ],
+        api_key="cursor-test-key",
+        workspace_root=tmp_path,
+        prompt_mode="slim",
+        timeout_seconds=5,
+    )
+
+    prompt = calls[0][0]
+    assert "Checkmate after evidence" in prompt
+
+
 def test_cursor_sdk_chat_mode_uses_terminal_cwd(monkeypatch, tmp_path):
     from agent.cursor_sdk_adapter import run_cursor_sdk_chat_completion
 
