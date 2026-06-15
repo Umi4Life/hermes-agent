@@ -45,11 +45,21 @@ class CursorTurnResult:
 
 
 def _classify_cursor_exception(exc: BaseException) -> tuple[bool, bool]:
-    """Return ``(is_cursor_error, is_transient)`` for retry decisions."""
+    """Return ``(is_cursor_error, is_retryable_transient)`` for retry decisions."""
     try:
         from cursor_sdk import CursorAgentError
     except ImportError:
         CursorAgentError = Exception  # type: ignore[misc,assignment]
+
+    msg = str(exc).lower()
+    bridge_down_markers = (
+        "connection refused",
+        "errno 111",
+        "connecterror",
+        "failed to establish a new connection",
+    )
+    if any(marker in msg for marker in bridge_down_markers):
+        return True, False
 
     network_error_types: tuple[type, ...] = ()
     try:
@@ -59,18 +69,29 @@ def _classify_cursor_exception(exc: BaseException) -> tuple[bool, bool]:
     except ImportError:
         pass
 
-    msg = str(exc).lower()
-    transient_markers = (
+    retryable_markers = (
         "peer closed connection",
         "incomplete chunked",
-        "bridge request failed",
         "remoteprotocol",
     )
-    is_transient = isinstance(exc, network_error_types) or any(
-        marker in msg for marker in transient_markers
+    is_retryable = any(marker in msg for marker in retryable_markers)
+    is_cursor = isinstance(exc, CursorAgentError) or is_retryable or isinstance(
+        exc, network_error_types
     )
-    is_cursor = isinstance(exc, CursorAgentError) or is_transient
-    return is_cursor, is_transient
+    return is_cursor, is_retryable
+
+
+def _format_cursor_startup_error(exc: BaseException) -> str:
+    msg = str(exc).lower()
+    if any(
+        marker in msg
+        for marker in ("connection refused", "errno 111", "connecterror")
+    ):
+        return (
+            "Cursor bridge unavailable (connection refused). "
+            "The local Cursor agent bridge may have stopped; retry shortly or use fallback."
+        )
+    return f"Cursor startup failed: {exc}"
 
 
 def _coerce_turn_input_text(user_input: Any) -> str:
@@ -252,6 +273,9 @@ class CursorSDKSession:
                 max_retries + 1,
                 result.error,
             )
+            backoff = float(settings.get("retry_backoff_seconds", 5) or 5)
+            if backoff > 0:
+                time.sleep(backoff)
             self.close()
             self._clear_persisted_agent()
 
@@ -281,7 +305,7 @@ class CursorSDKSession:
                 result.cursor_agent_error = True
             if is_transient:
                 result.transient_error = True
-            result.error = f"Cursor startup failed: {exc}" if is_cursor else f"Cursor session failed: {exc}"
+            result.error = _format_cursor_startup_error(exc) if is_cursor else f"Cursor session failed: {exc}"
             result.should_retire = True
             return result
 

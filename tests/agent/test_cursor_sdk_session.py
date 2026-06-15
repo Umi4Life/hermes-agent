@@ -196,6 +196,7 @@ def test_run_turn_retries_transient_wait_failure(cursor_agent):
                 "runtime": "delegated",
                 "timeout_seconds": 180,
                 "max_retries": 1,
+                "retry_backoff_seconds": 0,
                 "fast": False,
                 "hermes_tools_mcp": False,
                 "inject_identity": False,
@@ -210,6 +211,53 @@ def test_run_turn_retries_transient_wait_failure(cursor_agent):
     assert result.error is None
     assert result.final_text == "reply:ping"
     assert create_calls["n"] == 2
+
+
+def test_run_turn_connection_refused_on_retry_does_not_retry_again(cursor_agent):
+    class _FlakyRun(_FakeRun):
+        def wait(self):
+            raise RuntimeError(
+                "Bridge request failed: RemoteProtocolError: peer closed connection"
+            )
+
+    fake_sdk = _FakeSdkAgent()
+    create_calls = {"n": 0}
+
+    def _capture_create(options):
+        create_calls["n"] += 1
+        if create_calls["n"] == 1:
+            return _FakeAgentCM(fake_sdk)
+        raise RuntimeError("Bridge request failed: ConnectError: [Errno 111] Connection refused")
+
+    def flaky_send(self, prompt: str):
+        run = _FlakyRun(f"reply:{prompt}")
+        self._runs.append(run)
+        return run
+
+    with (
+        patch("cursor_sdk.Agent.create", side_effect=_capture_create),
+        patch.object(_FakeSdkAgent, "send", flaky_send),
+        patch(
+            "agent.transports.cursor_sdk_session.get_cursor_sdk_settings",
+            return_value={
+                "runtime": "delegated",
+                "timeout_seconds": 180,
+                "max_retries": 1,
+                "retry_backoff_seconds": 0,
+                "fast": False,
+                "hermes_tools_mcp": False,
+                "inject_identity": False,
+            },
+        ),
+    ):
+        from agent.transports.cursor_sdk_session import CursorSDKSession
+
+        session = CursorSDKSession(cursor_agent)
+        result = session.run_turn(user_input="ping")
+
+    assert create_calls["n"] == 2
+    assert result.transient_error is False
+    assert "bridge unavailable" in (result.error or "").lower()
 
 
 def test_run_turn_status_error_retires_and_clears_persisted_agent(cursor_agent):
@@ -236,6 +284,7 @@ def test_run_turn_status_error_retires_and_clears_persisted_agent(cursor_agent):
                 "runtime": "delegated",
                 "timeout_seconds": 180,
                 "max_retries": 0,
+                "retry_backoff_seconds": 0,
                 "fast": False,
                 "hermes_tools_mcp": False,
                 "inject_identity": False,

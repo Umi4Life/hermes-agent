@@ -16,6 +16,7 @@ _DEFAULT_CURSOR_SDK: Dict[str, Any] = {
     "runtime": "delegated",
     "timeout_seconds": 180,
     "max_retries": 1,
+    "retry_backoff_seconds": 5,
     "cwd": None,
     "local": True,
     # Composer 2.5 fast toggle — false = standard (cheaper); true = low-latency fast tier.
