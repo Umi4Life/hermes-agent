@@ -355,6 +355,9 @@ class CursorSDKSession:
         if status == "error":
             result.run_status_error = True
             result.error = f"Cursor run failed (status=error, id={getattr(terminal, 'id', '?')})"
+            result.should_retire = True
+            self._clear_persisted_agent()
+            self._release_sdk_agent()
 
         final_text = ""
         if hasattr(run, "text"):

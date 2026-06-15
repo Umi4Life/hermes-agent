@@ -9,8 +9,9 @@ import pytest
 
 
 class _FakeRun:
-    def __init__(self, text: str = "hello from cursor") -> None:
+    def __init__(self, text: str = "hello from cursor", *, status: str = "finished") -> None:
         self._text = text
+        self._status = status
         self._cancelled = False
         self._wait_calls = 0
         self._messages_called = False
@@ -24,7 +25,7 @@ class _FakeRun:
 
     def wait(self):
         self._wait_calls += 1
-        return SimpleNamespace(status="finished", id="run-1", result=self._text)
+        return SimpleNamespace(status=self._status, id="run-1", result=self._text)
 
     def text(self):
         return self._text
@@ -209,6 +210,54 @@ def test_run_turn_retries_transient_wait_failure(cursor_agent):
     assert result.error is None
     assert result.final_text == "reply:ping"
     assert create_calls["n"] == 2
+
+
+def test_run_turn_status_error_retires_and_clears_persisted_agent(cursor_agent):
+    fake_sdk = _FakeSdkAgent()
+    create_calls = {"n": 0}
+    send_calls = {"n": 0}
+
+    def _capture_create(options):
+        create_calls["n"] += 1
+        return _FakeAgentCM(fake_sdk)
+
+    def alternating_send(self, prompt: str):
+        send_calls["n"] += 1
+        if send_calls["n"] == 1:
+            return _FakeRun(f"reply:{prompt}", status="error")
+        return _FakeRun(f"reply:{prompt}")
+
+    with (
+        patch("cursor_sdk.Agent.create", side_effect=_capture_create),
+        patch.object(_FakeSdkAgent, "send", alternating_send),
+        patch(
+            "agent.transports.cursor_sdk_session.get_cursor_sdk_settings",
+            return_value={
+                "runtime": "delegated",
+                "timeout_seconds": 180,
+                "max_retries": 0,
+                "fast": False,
+                "hermes_tools_mcp": False,
+                "inject_identity": False,
+            },
+        ),
+    ):
+        from agent.transports.cursor_sdk_session import CursorSDKSession
+
+        session = CursorSDKSession(cursor_agent)
+        failed = session.run_turn(user_input="heavy turn")
+        ok = session.run_turn(user_input="k")
+
+    assert failed.run_status_error is True
+    assert failed.should_retire is True
+    assert failed.error is not None
+    assert ok.error is None
+    assert ok.final_text == "reply:k"
+    assert create_calls["n"] == 2
+    cleared_calls = [
+        c for c in cursor_agent._session_db.set_meta.call_args_list if c.args[1] == ""
+    ]
+    assert cleared_calls
 
 
 def test_model_selection_defaults_to_standard(cursor_agent):

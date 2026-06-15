@@ -63,6 +63,8 @@ def run_cursor_sdk_turn(
 
     if getattr(turn, "should_retire", False):
         try:
+            if agent._cursor_session is not None:
+                agent._cursor_session._clear_persisted_agent()
             agent._cursor_session.close()
         except Exception:
             pass
