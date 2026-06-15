@@ -26,6 +26,8 @@ from hermes_cli.cursor_sdk_config import (
 
 logger = logging.getLogger(__name__)
 
+_IDENTITY_SEPARATOR = "\n\n---\n\n"
+
 
 @dataclass
 class CursorTurnResult:
@@ -69,6 +71,7 @@ class CursorSDKSession:
         self._sdk_agent: Any = None
         self._sdk_agent_cm: Any = None
         self._interrupt_event = threading.Event()
+        self._pending_identity_prefix: Optional[str] = None
 
     def request_interrupt(self) -> None:
         self._interrupt_event.set()
@@ -129,7 +132,7 @@ class CursorSDKSession:
         self._meta_set(cursor_sdk_agent_meta_key(sid), agent_id)
         self._meta_set(cursor_sdk_identity_hash_key(sid), identity_hash)
 
-    def _build_agent_options(self, *, instructions: Optional[str] = None) -> Any:
+    def _build_agent_options(self) -> Any:
         from cursor_sdk import AgentOptions, LocalAgentOptions
 
         settings = get_cursor_sdk_settings()
@@ -139,11 +142,22 @@ class CursorSDKSession:
             "model": build_cursor_model_selection(self._agent, settings),
             "local": LocalAgentOptions(cwd=self._cwd),
         }
-        if instructions:
-            opts["instructions"] = instructions
         if mcp_servers:
             opts["mcp_servers"] = mcp_servers
         return AgentOptions(**opts)
+
+    def _build_create_kwargs(self, settings: dict[str, Any]) -> dict[str, Any]:
+        from cursor_sdk import LocalAgentOptions
+
+        create_kwargs: dict[str, Any] = {
+            "api_key": getattr(self._agent, "api_key", "") or "",
+            "model": build_cursor_model_selection(self._agent, settings),
+            "local": LocalAgentOptions(cwd=self._cwd),
+        }
+        mcp_servers = build_cursor_mcp_servers(settings)
+        if mcp_servers:
+            create_kwargs["mcp_servers"] = mcp_servers
+        return create_kwargs
 
     def _ensure_sdk_agent(self) -> None:
         if self._sdk_agent is not None:
@@ -170,18 +184,11 @@ class CursorSDKSession:
                 opts = self._build_agent_options()
                 cm = Agent.resume(stored_id, opts)
             else:
-                from cursor_sdk import Agent, LocalAgentOptions
+                from cursor_sdk import Agent
 
-                create_kwargs: dict[str, Any] = {
-                    "api_key": getattr(self._agent, "api_key", "") or "",
-                    "model": build_cursor_model_selection(self._agent, settings),
-                    "local": LocalAgentOptions(cwd=self._cwd),
-                }
+                create_kwargs = self._build_create_kwargs(settings)
                 if identity_prefix:
-                    create_kwargs["instructions"] = identity_prefix
-                mcp_servers = build_cursor_mcp_servers(settings)
-                if mcp_servers:
-                    create_kwargs["mcp_servers"] = mcp_servers
+                    self._pending_identity_prefix = identity_prefix
                 cm = Agent.create(**create_kwargs)
             self._sdk_agent_cm = cm
             self._sdk_agent = cm.__enter__()
@@ -233,8 +240,13 @@ class CursorSDKSession:
         assert self._sdk_agent is not None
         deadline = time.monotonic() + timeout
 
+        send_prompt = prompt
+        if self._pending_identity_prefix:
+            send_prompt = f"{self._pending_identity_prefix}{_IDENTITY_SEPARATOR}{prompt}"
+            self._pending_identity_prefix = None
+
         try:
-            run = self._sdk_agent.send(prompt)
+            run = self._sdk_agent.send(send_prompt)
         except Exception as exc:
             from cursor_sdk import CursorAgentError
 

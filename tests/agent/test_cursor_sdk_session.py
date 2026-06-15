@@ -91,6 +91,35 @@ def test_run_turn_creates_agent_and_returns_text(cursor_agent):
     cursor_agent._session_db.set_meta.assert_called()
 
 
+def test_run_turn_prepends_identity_on_first_send_not_agent_create(cursor_agent):
+    fake_sdk = _FakeSdkAgent()
+    captured_create_kwargs: dict = {}
+
+    def _capture_create(**kwargs):
+        captured_create_kwargs.update(kwargs)
+        return _FakeAgentCM(fake_sdk)
+
+    with (
+        patch("cursor_sdk.Agent.create", side_effect=_capture_create),
+        patch(
+            "agent.transports.cursor_sdk_session.build_identity_prefix",
+            return_value="You are Sky Feather.",
+        ),
+        patch(
+            "agent.transports.cursor_sdk_session.compute_identity_hash",
+            return_value="identity-hash-1",
+        ),
+    ):
+        from agent.transports.cursor_sdk_session import CursorSDKSession
+
+        session = CursorSDKSession(cursor_agent)
+        result = session.run_turn(user_input="ping")
+
+    assert "instructions" not in captured_create_kwargs
+    assert result.final_text.startswith("reply:You are Sky Feather.")
+    assert "ping" in result.final_text
+
+
 def test_model_selection_defaults_to_standard(cursor_agent):
     from hermes_cli.cursor_sdk_config import build_cursor_model_selection
 
