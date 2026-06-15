@@ -18,8 +18,10 @@ from hermes_cli.cursor_sdk_config import (
     build_cursor_model_selection,
     build_identity_prefix,
     compute_identity_hash,
+    cursor_sdk_agent_created_at_key,
     cursor_sdk_agent_meta_key,
     cursor_sdk_identity_hash_key,
+    cursor_sdk_turn_count_key,
     get_cursor_sdk_settings,
     resolve_cursor_sdk_cwd,
 )
@@ -175,6 +177,38 @@ class CursorSDKSession:
             return
         self._meta_set(cursor_sdk_agent_meta_key(sid), "")
         self._meta_set(cursor_sdk_identity_hash_key(sid), "")
+        self._meta_set(cursor_sdk_turn_count_key(sid), "")
+        self._meta_set(cursor_sdk_agent_created_at_key(sid), "")
+
+    def _get_turn_count(self, session_id: str) -> int:
+        raw = (self._meta_get(cursor_sdk_turn_count_key(session_id)) or "").strip()
+        try:
+            return max(0, int(raw))
+        except ValueError:
+            return 0
+
+    def _init_agent_rotation_meta(self, session_id: str) -> None:
+        self._meta_set(cursor_sdk_turn_count_key(session_id), "0")
+        self._meta_set(cursor_sdk_agent_created_at_key(session_id), str(int(time.time())))
+
+    def _increment_turn_count(self, session_id: str) -> None:
+        count = self._get_turn_count(session_id) + 1
+        self._meta_set(cursor_sdk_turn_count_key(session_id), str(count))
+
+    def _should_rotate_agent(self, settings: dict[str, Any], session_id: str) -> bool:
+        max_turns = int(settings.get("max_turns_per_agent", 0) or 0)
+        if max_turns > 0 and self._get_turn_count(session_id) >= max_turns:
+            return True
+        max_age = float(settings.get("max_agent_age_seconds", 0) or 0)
+        if max_age > 0:
+            raw_created = (self._meta_get(cursor_sdk_agent_created_at_key(session_id)) or "").strip()
+            try:
+                created_at = float(raw_created)
+            except ValueError:
+                return False
+            if created_at > 0 and (time.time() - created_at) >= max_age:
+                return True
+        return False
 
     def _persist_agent(self, agent_id: str, identity_hash: str) -> None:
         sid = getattr(self._agent, "session_id", None) or ""
@@ -213,6 +247,18 @@ class CursorSDKSession:
             self._clear_persisted_agent()
             self._release_sdk_agent()
             stored_id = ""
+        if stored_id and self._should_rotate_agent(settings, sid):
+            logger.info(
+                "cursor_sdk: rotating agent (turn_count=%s, max_turns=%s, max_age=%ss)",
+                self._get_turn_count(sid),
+                settings.get("max_turns_per_agent", 0),
+                settings.get("max_agent_age_seconds", 0),
+            )
+            self._clear_persisted_agent()
+            self._release_sdk_agent()
+            stored_id = ""
+            if identity_prefix:
+                self._pending_identity_prefix = identity_prefix
         resume = bool(stored_id) and stored_hash == identity_hash
 
         try:
@@ -221,6 +267,7 @@ class CursorSDKSession:
 
                 opts = self._build_agent_options()
                 cm = Agent.resume(stored_id, opts)
+                created_new = False
             else:
                 from cursor_sdk import Agent
 
@@ -228,11 +275,14 @@ class CursorSDKSession:
                 if identity_prefix:
                     self._pending_identity_prefix = identity_prefix
                 cm = Agent.create(opts)
+                created_new = True
             self._sdk_agent_cm = cm
             self._sdk_agent = cm.__enter__()
             agent_id = str(getattr(self._sdk_agent, "agent_id", "") or stored_id)
             if agent_id:
                 self._persist_agent(agent_id, identity_hash)
+                if created_new:
+                    self._init_agent_rotation_meta(sid)
         except CursorAgentError as exc:
             self._clear_persisted_agent()
             raise exc
@@ -262,6 +312,14 @@ class CursorSDKSession:
                 stream_callback=stream_callback,
                 settings=settings,
             )
+            if (
+                not result.error
+                and not result.interrupted
+                and result.final_text
+            ):
+                sid = getattr(self._agent, "session_id", None) or ""
+                if sid:
+                    self._increment_turn_count(sid)
             if not result.error or not result.transient_error:
                 return result
             last_result = result

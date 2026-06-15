@@ -381,6 +381,8 @@ def test_fallback_wrapper_sets_delivery_messages():
         session_api_calls=0,
         _sync_external_memory_for_turn=MagicMock(),
         _try_activate_fallback=MagicMock(return_value=True),
+        _fallback_chain=[{"provider": "openrouter", "model": "anthropic/claude-sonnet-4"}],
+        _fallback_index=1,
         _cursor_session=None,
     )
     agent._session_db.get_meta.return_value = None
@@ -414,3 +416,252 @@ def test_fallback_wrapper_sets_delivery_messages():
     assert result["delivery_messages"] == ["⚠️ Cursor: boom", "fallback answer"]
     assert result["final_response"] is None
     assert agent._cursor_fallback_replay is True
+
+
+def test_fallback_wrapper_hints_when_chain_empty():
+    from agent.cursor_sdk_runtime import run_cursor_sdk_turn_with_fallback
+
+    agent = SimpleNamespace(
+        _try_activate_fallback=MagicMock(return_value=False),
+        _fallback_chain=[],
+        _cursor_session=None,
+        _interrupt_requested=False,
+        _iters_since_skill=0,
+        session_api_calls=0,
+        _sync_external_memory_for_turn=MagicMock(),
+        _session_db=MagicMock(),
+    )
+    agent._session_db.get_meta.return_value = None
+
+    turn = SimpleNamespace(
+        final_text="",
+        projected_messages=[],
+        tool_iterations=0,
+        interrupted=False,
+        error="boom",
+        should_retire=True,
+        cursor_agent_error=True,
+        run_status_error=False,
+    )
+
+    with patch("agent.transports.cursor_sdk_session.CursorSDKSession") as session_cls:
+        session_cls.return_value.run_turn.return_value = turn
+        session_cls.return_value.close = MagicMock()
+        result = run_cursor_sdk_turn_with_fallback(
+            agent,
+            user_message="hello",
+            original_user_message="hello",
+            messages=[{"role": "user", "content": "hello"}],
+            effective_task_id="t1",
+            run_conversation_fn=MagicMock(),
+        )
+
+    assert "fallback_providers" in result["final_response"]
+    agent._try_activate_fallback.assert_not_called()
+
+
+def test_fallback_wrapper_delivery_on_fallback_error():
+    from agent.cursor_sdk_runtime import run_cursor_sdk_turn_with_fallback
+
+    agent = SimpleNamespace(
+        _try_activate_fallback=MagicMock(return_value=True),
+        _fallback_chain=[{"provider": "openrouter", "model": "anthropic/claude-sonnet-4"}],
+        _fallback_index=1,
+        _cursor_session=None,
+        _interrupt_requested=False,
+        _iters_since_skill=0,
+        session_api_calls=0,
+        _sync_external_memory_for_turn=MagicMock(),
+        _session_db=MagicMock(),
+    )
+    agent._session_db.get_meta.return_value = None
+
+    turn = SimpleNamespace(
+        final_text="",
+        projected_messages=[],
+        tool_iterations=0,
+        interrupted=False,
+        error="peer closed",
+        should_retire=True,
+        cursor_agent_error=False,
+        run_status_error=False,
+    )
+
+    def _failing_fallback(_agent, user_message, **kwargs):
+        return {"final_response": "", "error": "payment required", "completed": False}
+
+    with patch("agent.transports.cursor_sdk_session.CursorSDKSession") as session_cls:
+        session_cls.return_value.run_turn.return_value = turn
+        session_cls.return_value.close = MagicMock()
+        result = run_cursor_sdk_turn_with_fallback(
+            agent,
+            user_message="hello",
+            original_user_message="hello",
+            messages=[{"role": "user", "content": "hello"}],
+            effective_task_id="t1",
+            run_conversation_fn=_failing_fallback,
+        )
+
+    assert result["delivery_messages"] == [
+        "⚠️ Cursor: peer closed",
+        "⚠️ Fallback failed: payment required",
+    ]
+
+
+def test_cap_channel_context_block_truncates_over_limit():
+    from hermes_cli.cursor_sdk_config import cap_channel_context_block
+
+    backfill = "[Recent channel messages]\n" + ("x" * 20000)
+    message = f"{backfill}\n\n[New message]\nping"
+    capped = cap_channel_context_block(message, 16000)
+    assert "[New message]\nping" in capped
+    assert len(capped.split("\n\n[New message]\n")[0]) <= 16000
+    assert "...[channel context truncated for Cursor]" in capped
+
+
+def test_cap_channel_context_block_unchanged_under_limit():
+    from hermes_cli.cursor_sdk_config import cap_channel_context_block
+
+    message = "[Recent channel messages]\n[Alice] hi\n\n[New message]\nping"
+    assert cap_channel_context_block(message, 16000) == message
+
+
+def test_cap_channel_context_block_zero_disables():
+    from hermes_cli.cursor_sdk_config import cap_channel_context_block
+
+    message = "[Recent channel messages]\n" + ("x" * 20000) + "\n\n[New message]\nping"
+    assert cap_channel_context_block(message, 0) == message
+
+
+def test_agent_rotation_on_max_turns_uses_create_not_resume(cursor_agent):
+    fake_sdk = _FakeSdkAgent()
+    meta_store = {
+        "cursor_sdk.agent_id.sess-1": "stored-agent",
+        "cursor_sdk.identity_hash.sess-1": "identity-hash-1",
+        "cursor_sdk.turn_count.sess-1": "3",
+    }
+    cursor_agent._session_db.get_meta.side_effect = lambda key: meta_store.get(key)
+
+    with (
+        patch("cursor_sdk.Agent.create", return_value=_FakeAgentCM(fake_sdk)) as create_mock,
+        patch("cursor_sdk.Agent.resume") as resume_mock,
+        patch(
+            "agent.transports.cursor_sdk_session.compute_identity_hash",
+            return_value="identity-hash-1",
+        ),
+        patch(
+            "agent.transports.cursor_sdk_session.get_cursor_sdk_settings",
+            return_value={
+                "max_turns_per_agent": 3,
+                "max_agent_age_seconds": 0,
+                "timeout_seconds": 180,
+                "max_retries": 0,
+            },
+        ),
+    ):
+        from agent.transports.cursor_sdk_session import CursorSDKSession
+
+        session = CursorSDKSession(cursor_agent)
+        session.run_turn(user_input="ping")
+
+    resume_mock.assert_not_called()
+    create_mock.assert_called_once()
+
+
+def test_agent_rotation_on_max_age_uses_create_not_resume(cursor_agent, monkeypatch):
+    fake_sdk = _FakeSdkAgent()
+    meta_store = {
+        "cursor_sdk.agent_id.sess-1": "stored-agent",
+        "cursor_sdk.identity_hash.sess-1": "identity-hash-1",
+        "cursor_sdk.turn_count.sess-1": "1",
+        "cursor_sdk.agent_created_at.sess-1": "1000",
+    }
+    cursor_agent._session_db.get_meta.side_effect = lambda key: meta_store.get(key)
+    monkeypatch.setattr("agent.transports.cursor_sdk_session.time.time", lambda: 5000)
+
+    with (
+        patch("cursor_sdk.Agent.create", return_value=_FakeAgentCM(fake_sdk)) as create_mock,
+        patch("cursor_sdk.Agent.resume") as resume_mock,
+        patch(
+            "agent.transports.cursor_sdk_session.compute_identity_hash",
+            return_value="identity-hash-1",
+        ),
+        patch(
+            "agent.transports.cursor_sdk_session.get_cursor_sdk_settings",
+            return_value={
+                "max_turns_per_agent": 0,
+                "max_agent_age_seconds": 3600,
+                "timeout_seconds": 180,
+                "max_retries": 0,
+            },
+        ),
+    ):
+        from agent.transports.cursor_sdk_session import CursorSDKSession
+
+        session = CursorSDKSession(cursor_agent)
+        session.run_turn(user_input="ping")
+
+    resume_mock.assert_not_called()
+    create_mock.assert_called_once()
+
+
+def test_successful_turn_increments_turn_count(cursor_agent):
+    fake_sdk = _FakeSdkAgent()
+    meta_store: dict[str, str] = {}
+
+    def _set_meta(key, value):
+        meta_store[key] = value
+
+    cursor_agent._session_db.get_meta.side_effect = lambda key: meta_store.get(key)
+    cursor_agent._session_db.set_meta.side_effect = _set_meta
+
+    with (
+        patch("cursor_sdk.Agent.create", return_value=_FakeAgentCM(fake_sdk)),
+        patch(
+            "agent.transports.cursor_sdk_session.get_cursor_sdk_settings",
+            return_value={"timeout_seconds": 180, "max_retries": 0},
+        ),
+    ):
+        from agent.transports.cursor_sdk_session import CursorSDKSession
+
+        session = CursorSDKSession(cursor_agent)
+        session.run_turn(user_input="ping")
+
+    assert meta_store.get("cursor_sdk.turn_count.sess-1") == "1"
+
+
+def test_failed_turn_does_not_increment_turn_count(cursor_agent):
+    class _ErrorRun(_FakeRun):
+        def wait(self):
+            raise RuntimeError("peer closed")
+
+    fake_sdk = _FakeSdkAgent()
+
+    def _send(prompt: str):
+        run = _ErrorRun(f"reply:{prompt}")
+        fake_sdk._runs.append(run)
+        return run
+
+    fake_sdk.send = _send
+    meta_store: dict[str, str] = {}
+
+    def _set_meta(key, value):
+        meta_store[key] = value
+
+    cursor_agent._session_db.get_meta.side_effect = lambda key: meta_store.get(key)
+    cursor_agent._session_db.set_meta.side_effect = _set_meta
+
+    with (
+        patch("cursor_sdk.Agent.create", return_value=_FakeAgentCM(fake_sdk)),
+        patch(
+            "agent.transports.cursor_sdk_session.get_cursor_sdk_settings",
+            return_value={"timeout_seconds": 180, "max_retries": 0},
+        ),
+    ):
+        from agent.transports.cursor_sdk_session import CursorSDKSession
+
+        session = CursorSDKSession(cursor_agent)
+        result = session.run_turn(user_input="ping")
+
+    assert result.error
+    assert meta_store.get("cursor_sdk.turn_count.sess-1") in (None, "0")

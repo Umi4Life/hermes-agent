@@ -26,7 +26,13 @@ _DEFAULT_CURSOR_SDK: Dict[str, Any] = {
     "identity_mode": "full",
     "identity_max_chars": 4000,
     "hermes_tools_mcp": True,
+    "max_channel_context_chars": 16000,
+    "max_turns_per_agent": 0,
+    "max_agent_age_seconds": 0,
 }
+
+_CHANNEL_CONTEXT_DELIMITER = "\n\n[New message]\n"
+_CHANNEL_CONTEXT_TRUNCATED = "...[channel context truncated for Cursor]"
 
 
 def get_cursor_sdk_settings(config: Optional[dict] = None) -> dict[str, Any]:
@@ -181,3 +187,26 @@ def cursor_sdk_agent_meta_key(session_id: str) -> str:
 
 def cursor_sdk_identity_hash_key(session_id: str) -> str:
     return f"cursor_sdk.identity_hash.{session_id}"
+
+
+def cursor_sdk_turn_count_key(session_id: str) -> str:
+    return f"cursor_sdk.turn_count.{session_id}"
+
+
+def cursor_sdk_agent_created_at_key(session_id: str) -> str:
+    return f"cursor_sdk.agent_created_at.{session_id}"
+
+
+def cap_channel_context_block(user_message: str, max_chars: int) -> str:
+    """Truncate Discord channel backfill prefix before the cursor send payload."""
+    if max_chars <= 0 or not user_message:
+        return user_message
+    if _CHANNEL_CONTEXT_DELIMITER not in user_message:
+        return user_message
+    prefix, suffix = user_message.split(_CHANNEL_CONTEXT_DELIMITER, 1)
+    if len(prefix) <= max_chars:
+        return user_message
+    trailer = f"\n{_CHANNEL_CONTEXT_TRUNCATED}"
+    budget = max(0, max_chars - len(trailer))
+    trimmed = prefix[:budget].rstrip()
+    return f"{trimmed}{trailer}{_CHANNEL_CONTEXT_DELIMITER}{suffix}"

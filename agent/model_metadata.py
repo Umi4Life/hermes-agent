@@ -209,6 +209,9 @@ DEFAULT_CONTEXT_LENGTHS = {
     # https://platform.minimax.io/docs/api-reference/text-chat-openai
     "minimax-m3": 1000000,
     "minimax": 204800,
+    # Cursor Composer (delegated cursor-sdk runtime; not probeable via HTTP)
+    "composer-2.5": 200_000,
+    "composer-2": 200_000,
     # GLM
     "glm": 202752,
     # xAI Grok — xAI /v1/models does not return context_length metadata,

@@ -25,6 +25,9 @@ cursor_sdk:
   hermes_tools_mcp: true
   inject_identity: true
   identity_mode: full   # full | compact | off
+  max_channel_context_chars: 16000  # truncate Discord mention backfill; 0 = off
+  max_turns_per_agent: 0             # rotate Agent.create after N successes; 0 = off
+  max_agent_age_seconds: 0          # rotate after wall-clock age; 0 = off
 
 fallback_providers:
   - provider: openrouter
@@ -85,6 +88,27 @@ The fallback chain skips entries that duplicate the active `cursor-sdk` + model 
 `SessionDB.state_meta` stores `cursor_sdk.agent_id.<session_id>` for `Agent.resume()`. Inline MCP servers are re-passed on every resume (not persisted by the SDK).
 
 On startup failure, the stored id is cleared and the next turn calls `Agent.create` again.
+
+## Context length
+
+Hermes resolves `composer-2.5` to a **200K** context window in the model catalog (not the generic 256K unknown-model fallback). Override anytime with `model.context_length: 200000` in `config.yaml`.
+
+## Bridge hardening
+
+### Channel context cap
+
+Discord `@mention` backfill prepends recent channel history before your message. On the cursor path, Hermes truncates that block to `cursor_sdk.max_channel_context_chars` (default **16000**) before `Agent.send()`. Set `0` to disable. Native providers are unaffected.
+
+### Agent rotation (opt-in)
+
+Long-lived `Agent.resume()` sessions can stress the local bridge. Optional rotation forces a fresh `Agent.create`:
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `max_turns_per_agent` | `0` | Rotate after this many **successful** cursor turns (`0` = disabled) |
+| `max_agent_age_seconds` | `0` | Rotate when the stored agent is older than this (`0` = disabled) |
+
+Recommended starting points for heavy Discord use: `max_turns_per_agent: 25`–`40` or `max_agent_age_seconds: 3600`. Use `/new` after bridge errors even when rotation is off.
 
 ## Interrupt and restart
 

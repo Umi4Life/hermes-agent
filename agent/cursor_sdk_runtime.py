@@ -5,6 +5,8 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, List
 
+from hermes_constants import display_hermes_home
+
 logger = logging.getLogger(__name__)
 
 
@@ -31,6 +33,16 @@ def run_cursor_sdk_turn(
 ) -> Dict[str, Any]:
     """Hand one turn to the Cursor SDK delegated runtime."""
     from agent.transports.cursor_sdk_session import CursorSDKSession
+    from hermes_cli.cursor_sdk_config import (
+        cap_channel_context_block,
+        get_cursor_sdk_settings,
+    )
+
+    settings = get_cursor_sdk_settings()
+    user_message = cap_channel_context_block(
+        user_message,
+        int(settings.get("max_channel_context_chars", 0) or 0),
+    )
 
     if getattr(agent, "_interrupt_requested", False):
         if hasattr(agent, "_cursor_session") and agent._cursor_session is not None:
@@ -136,8 +148,41 @@ def run_cursor_sdk_turn_with_fallback(
         return result
 
     error_text = result.get("final_response") or ""
-    if not agent._try_activate_fallback():
+    chain = list(getattr(agent, "_fallback_chain", None) or [])
+    if not chain:
+        logger.warning(
+            "cursor_sdk: Cursor failed but fallback_providers is empty — "
+            "add entries in config.yaml or `hermes fallback add`"
+        )
+        if error_text and "fallback_providers" not in error_text.lower():
+            result["final_response"] = (
+                f"{error_text}\n\n"
+                "_(No fallback_providers configured — add one in "
+                f"{display_hermes_home()}/config.yaml.)_"
+            )
         return result
+
+    if not agent._try_activate_fallback():
+        logger.warning(
+            "cursor_sdk: fallback chain exhausted or providers not configured "
+            "(%d entries, index=%s)",
+            len(chain),
+            getattr(agent, "_fallback_index", "?"),
+        )
+        if error_text and "fallback" not in error_text.lower():
+            result["final_response"] = (
+                f"{error_text}\n\n"
+                "_(Fallback chain could not activate — check API keys and "
+                f"{display_hermes_home()}/config.yaml fallback_providers.)_"
+            )
+        return result
+
+    fb_entry = chain[min(getattr(agent, "_fallback_index", 1) - 1, len(chain) - 1)]
+    logger.info(
+        "cursor_sdk: activating fallback %s/%s",
+        fb_entry.get("provider"),
+        fb_entry.get("model"),
+    )
 
     agent._cursor_fallback_replay = True
     fb_result = run_conversation_fn(
@@ -147,6 +192,16 @@ def run_cursor_sdk_turn_with_fallback(
         stream_callback=stream_callback,
     )
     fallback_text = fb_result.get("final_response") or ""
+    if not fallback_text:
+        fb_error = fb_result.get("error")
+        if fb_error:
+            fallback_text = f"⚠️ Fallback failed: {fb_error}"
+        else:
+            logger.warning(
+                "cursor_sdk: fallback returned no response (completed=%s)",
+                fb_result.get("completed"),
+            )
+
     if fallback_text:
         result["delivery_messages"] = [error_text, fallback_text]
         result["final_response"] = None
@@ -154,4 +209,5 @@ def run_cursor_sdk_turn_with_fallback(
         result["completed"] = fb_result.get("completed", False)
         result["partial"] = True
         result["cursor_fallback_eligible"] = False
+        logger.info("cursor_sdk: two-message fallback delivery prepared")
     return result

@@ -919,6 +919,17 @@ class TestGetModelContextLength:
 
         assert result == 200000
 
+    @patch("agent.model_metadata.get_cached_context_length", return_value=None)
+    @patch("agent.model_metadata.fetch_model_metadata", return_value={})
+    def test_composer_25_resolves_200k_for_cursor_sdk(self, _fetch, _cache):
+        """composer-2.5 must not fall through to the 256K default fallback."""
+        result = get_model_context_length(
+            "composer-2.5",
+            base_url="cursor-sdk://local",
+            provider="cursor-sdk",
+        )
+        assert result == 200_000
+
     @patch("agent.model_metadata.fetch_model_metadata")
     def test_custom_endpoint_falls_back_to_hardcoded_catalog(self, mock_fetch):
         """Custom/proxied endpoint that fails all probes should still resolve

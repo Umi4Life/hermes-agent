@@ -1752,6 +1752,9 @@ DEFAULT_CONFIG = {
         "identity_mode": "full",
         "identity_max_chars": 4000,
         "hermes_tools_mcp": True,
+        "max_channel_context_chars": 16000,
+        "max_turns_per_agent": 0,
+        "max_agent_age_seconds": 0,
     },
 
     # Subagent delegation — override the provider:model used by delegate_task

@@ -1367,3 +1367,19 @@ not the specific names.
 
 Reviewers should reject new change-detector tests; authors should convert
 them into invariants before re-requesting review.
+
+## Learned User Preferences
+
+- Keep `cursor_sdk.fast: false` (standard Composer tier); do not default to fast mode without explicit opt-in.
+- For Cursor SDK integration work, avoid broad provider redesign and preserve fallback ordering unless a fix truly requires changing it.
+- Do not use qwen (or other fallback models) for implementation decisions; reserve GPT-5.5 for review and escalation only.
+- After cursor-sdk code changes, pull `feat/cursor-sdk-v2` on the Linux VM gateway and restart before Discord smoke tests.
+
+## Learned Workspace Facts
+
+- Fork `Umi4Life/hermes-agent`; active Cursor SDK work lives on branch `feat/cursor-sdk-v2` (delegated runtime, `provider: cursor-sdk`, `composer-2.5` for Discord gateway).
+- Linux VM gateway runs from `~/.hermes/hermes-agent` against `feat/cursor-sdk-v2`.
+- `cursor-sdk` Python: pass MCP via `Agent.create(AgentOptions(...))`, not top-level `mcp_servers` or `instructions` kwargs.
+- SOUL/identity is prepended on the first `agent.send()`, not via `Agent.create(instructions=...)`.
+- Discord non-streaming turns use `run.wait()` and `run.text()`; avoid `run.messages()` (fragile bridge stream).
+- On bridge `status=error`, retire the Cursor session, clear `cursor_sdk.agent_id`, and create a fresh agent on the next turn.
