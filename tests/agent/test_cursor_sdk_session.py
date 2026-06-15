@@ -12,11 +12,18 @@ class _FakeRun:
     def __init__(self, text: str = "hello from cursor") -> None:
         self._text = text
         self._cancelled = False
+        self._wait_calls = 0
+        self._messages_called = False
 
     def iter_text(self):
         yield self._text
 
+    def messages(self):
+        self._messages_called = True
+        yield {"type": "assistant", "message": {"content": [{"type": "text", "text": self._text}]}}
+
     def wait(self):
+        self._wait_calls += 1
         return SimpleNamespace(status="finished", id="run-1", result=self._text)
 
     def text(self):
@@ -85,6 +92,8 @@ def test_run_turn_creates_agent_and_returns_text(cursor_agent):
 
     assert result.final_text == "reply:hi there"
     assert result.error is None
+    assert fake_sdk._runs[0]._messages_called is False
+    assert fake_sdk._runs[0]._wait_calls == 1
     assert result.projected_messages == [
         {"role": "assistant", "content": "reply:hi there"}
     ]
@@ -149,6 +158,57 @@ def test_run_turn_create_uses_agent_options_for_mcp(cursor_agent):
     assert opts.mcp_servers == {
         "hermes-tools": {"command": "python", "args": ["-m", "mcp"]}
     }
+
+
+def test_run_turn_retries_transient_wait_failure(cursor_agent):
+    class _FlakyRun(_FakeRun):
+        def __init__(self, prompt: str) -> None:
+            super().__init__(f"reply:{prompt}")
+            self._attempt = 0
+
+        def wait(self):
+            self._attempt += 1
+            if self._attempt == 1:
+                raise RuntimeError(
+                    "Bridge request failed: RemoteProtocolError: peer closed connection"
+                )
+            return super().wait()
+
+    fake_sdk = _FakeSdkAgent()
+    create_calls = {"n": 0}
+
+    def _capture_create(options):
+        create_calls["n"] += 1
+        return _FakeAgentCM(fake_sdk)
+
+    def flaky_send(self, prompt: str):
+        run = _FlakyRun(prompt)
+        self._runs.append(run)
+        return run
+
+    with (
+        patch("cursor_sdk.Agent.create", side_effect=_capture_create),
+        patch.object(_FakeSdkAgent, "send", flaky_send),
+        patch(
+            "agent.transports.cursor_sdk_session.get_cursor_sdk_settings",
+            return_value={
+                "runtime": "delegated",
+                "timeout_seconds": 180,
+                "max_retries": 1,
+                "fast": False,
+                "hermes_tools_mcp": False,
+                "inject_identity": False,
+            },
+        ),
+    ):
+        from agent.transports.cursor_sdk_session import CursorSDKSession
+
+        session = CursorSDKSession(cursor_agent)
+        result = session.run_turn(user_input="ping")
+
+    assert result.error is None
+    assert result.final_text == "reply:ping"
+    assert create_calls["n"] == 2
 
 
 def test_model_selection_defaults_to_standard(cursor_agent):

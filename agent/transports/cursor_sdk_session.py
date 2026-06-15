@@ -41,6 +41,36 @@ class CursorTurnResult:
     should_retire: bool = False
     cursor_agent_error: bool = False
     run_status_error: bool = False
+    transient_error: bool = False
+
+
+def _classify_cursor_exception(exc: BaseException) -> tuple[bool, bool]:
+    """Return ``(is_cursor_error, is_transient)`` for retry decisions."""
+    try:
+        from cursor_sdk import CursorAgentError
+    except ImportError:
+        CursorAgentError = Exception  # type: ignore[misc,assignment]
+
+    network_error_types: tuple[type, ...] = ()
+    try:
+        from cursor_sdk.errors import NetworkError
+
+        network_error_types = (NetworkError,)
+    except ImportError:
+        pass
+
+    msg = str(exc).lower()
+    transient_markers = (
+        "peer closed connection",
+        "incomplete chunked",
+        "bridge request failed",
+        "remoteprotocol",
+    )
+    is_transient = isinstance(exc, network_error_types) or any(
+        marker in msg for marker in transient_markers
+    )
+    is_cursor = isinstance(exc, CursorAgentError) or is_transient
+    return is_cursor, is_transient
 
 
 def _coerce_turn_input_text(user_input: Any) -> str:
@@ -202,6 +232,38 @@ class CursorSDKSession:
         stream_callback: Optional[Callable[[str], Any]] = None,
     ) -> CursorTurnResult:
         settings = get_cursor_sdk_settings()
+        max_retries = max(0, int(settings.get("max_retries", 1) or 1))
+        last_result: Optional[CursorTurnResult] = None
+
+        for attempt in range(max_retries + 1):
+            result = self._run_turn_once(
+                user_input=user_input,
+                stream_callback=stream_callback,
+                settings=settings,
+            )
+            if not result.error or not result.transient_error:
+                return result
+            last_result = result
+            if attempt >= max_retries:
+                break
+            logger.warning(
+                "cursor_sdk transient bridge error (attempt %d/%d): %s — retrying",
+                attempt + 1,
+                max_retries + 1,
+                result.error,
+            )
+            self.close()
+            self._clear_persisted_agent()
+
+        return last_result or CursorTurnResult(error="unknown Cursor error")
+
+    def _run_turn_once(
+        self,
+        *,
+        user_input: Any,
+        stream_callback: Optional[Callable[[str], Any]],
+        settings: dict[str, Any],
+    ) -> CursorTurnResult:
         timeout = float(settings.get("timeout_seconds", 180) or 180)
         result = CursorTurnResult()
         prompt = _coerce_turn_input_text(user_input)
@@ -214,13 +276,12 @@ class CursorSDKSession:
         try:
             self._ensure_sdk_agent()
         except Exception as exc:
-            from cursor_sdk import CursorAgentError
-
-            if isinstance(exc, CursorAgentError):
+            is_cursor, is_transient = _classify_cursor_exception(exc)
+            if is_cursor:
                 result.cursor_agent_error = True
-                result.error = f"Cursor startup failed: {exc}"
-            else:
-                result.error = f"Cursor session failed: {exc}"
+            if is_transient:
+                result.transient_error = True
+            result.error = f"Cursor startup failed: {exc}" if is_cursor else f"Cursor session failed: {exc}"
             result.should_retire = True
             return result
 
@@ -235,19 +296,18 @@ class CursorSDKSession:
         try:
             run = self._sdk_agent.send(send_prompt)
         except Exception as exc:
-            from cursor_sdk import CursorAgentError
-
-            if isinstance(exc, CursorAgentError):
+            is_cursor, is_transient = _classify_cursor_exception(exc)
+            if is_cursor:
                 result.cursor_agent_error = True
-                result.error = f"Cursor send failed: {exc}"
-            else:
-                result.error = f"Cursor send failed: {exc}"
+            if is_transient:
+                result.transient_error = True
+            result.error = f"Cursor send failed: {exc}"
             result.should_retire = True
             return result
 
         chunks: list[str] = []
-        try:
-            if stream_callback is not None and hasattr(run, "iter_text"):
+        if stream_callback is not None and hasattr(run, "iter_text"):
+            try:
                 for text in run.iter_text():
                     if self._should_stop() or time.monotonic() >= deadline:
                         break
@@ -257,26 +317,38 @@ class CursorSDKSession:
                             stream_callback(text)
                         except Exception:
                             logger.debug("cursor_sdk stream callback failed", exc_info=True)
-            elif hasattr(run, "messages"):
-                for message in run.messages():
-                    if self._should_stop() or time.monotonic() >= deadline:
-                        break
-                    text = _extract_assistant_text(message)
-                    if text:
-                        chunks.append(text)
-        finally:
-            if self._should_stop() and hasattr(run, "supports") and run.supports("cancel"):
-                try:
-                    run.cancel()
-                    result.interrupted = True
-                except Exception:
-                    logger.debug("cursor_sdk run.cancel failed", exc_info=True)
+            except Exception as exc:
+                is_cursor, is_transient = _classify_cursor_exception(exc)
+                if is_transient:
+                    result.transient_error = True
+                logger.warning(
+                    "cursor_sdk iter_text failed, falling back to wait(): %s",
+                    exc,
+                    exc_info=is_transient,
+                )
+        if self._should_stop() and hasattr(run, "supports") and run.supports("cancel"):
+            try:
+                run.cancel()
+                result.interrupted = True
+            except Exception:
+                logger.debug("cursor_sdk run.cancel failed", exc_info=True)
 
         try:
             terminal = run.wait()
         except Exception as exc:
+            is_cursor, is_transient = _classify_cursor_exception(exc)
+            if is_cursor:
+                result.cursor_agent_error = True
+            if is_transient:
+                result.transient_error = True
             result.error = f"Cursor wait failed: {exc}"
             result.should_retire = True
+            if chunks:
+                result.final_text = "".join(chunks).strip()
+                if result.final_text:
+                    result.projected_messages.append(
+                        {"role": "assistant", "content": result.final_text}
+                    )
             return result
 
         status = str(getattr(terminal, "status", "") or "")
@@ -300,6 +372,8 @@ class CursorSDKSession:
             result.projected_messages.append(
                 {"role": "assistant", "content": result.final_text}
             )
+            if not result.error:
+                result.transient_error = False
 
         if self._should_stop() and not result.interrupted:
             result.interrupted = True
@@ -307,35 +381,7 @@ class CursorSDKSession:
         if time.monotonic() >= deadline and not result.final_text:
             result.error = result.error or f"Cursor turn timed out after {int(timeout)}s"
             result.should_retire = True
+            result.transient_error = True
 
         return result
 
-
-def _extract_assistant_text(message: Any) -> str:
-    msg_type = getattr(message, "type", None) or (
-        message.get("type") if isinstance(message, dict) else None
-    )
-    if msg_type != "assistant":
-        return ""
-    payload = getattr(message, "message", None) or (
-        message.get("message") if isinstance(message, dict) else None
-    )
-    if payload is None:
-        return ""
-    content = getattr(payload, "content", None) or (
-        payload.get("content") if isinstance(payload, dict) else None
-    )
-    if not content:
-        return ""
-    parts: list[str] = []
-    for block in content:
-        block_type = getattr(block, "type", None) or (
-            block.get("type") if isinstance(block, dict) else None
-        )
-        if block_type == "text":
-            text = getattr(block, "text", None) or (
-                block.get("text") if isinstance(block, dict) else ""
-            )
-            if text:
-                parts.append(str(text))
-    return "".join(parts)
