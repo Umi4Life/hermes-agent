@@ -737,3 +737,69 @@ class TestStatusLineSubgoalCount:
         mgr.add_subgoal("b")
         line = mgr.status_line()
         assert "2 subgoals" in line
+
+
+class TestGoalSurvivesCompressionRotation:
+    """Regression: objective=None after a long/compressed turn.
+
+    Context compression ends the active session and forks a child session
+    (linked via ``parent_session_id``); the new messages land in the child,
+    and ``/resume`` redirects to that child via
+    ``SessionDB.resolve_resume_session_id``. The goal was saved under the
+    parent's id (``goal:<parent>``), but ``get_meta`` is a flat lookup with no
+    lineage fallback — so the resumed (child) session's GoalManager reads None.
+
+    The fix migrates the durable goal A -> B at the rotation boundary
+    (``hermes_cli.goals.migrate_goal``, called from
+    ``agent.conversation_compression.compress_context``), keeping the flat
+    GoalManager lookup unchanged. These tests pin that invariant.
+    """
+
+    def test_goal_survives_session_rotation_and_resume_redirect(self, hermes_home):
+        from hermes_state import SessionDB
+        from hermes_cli.goals import GoalManager, migrate_goal
+
+        parent, child = "rot-parent", "rot-child"
+        db = SessionDB()
+
+        # 1. Parent session.
+        db.create_session(parent, source="cli")
+
+        # 2. Set a goal on the parent — persisted under "goal:<parent>".
+        GoalManager(parent).set("finish the migration")
+        assert GoalManager(parent).has_goal() is True  # baseline sanity
+
+        # 3. Simulate the compression rotation as compress_context performs it:
+        #    end the parent, fork the child with parent_session_id, land a
+        #    message in the child (so it holds the conversation), and migrate
+        #    the durable goal via the same helper the rotation calls.
+        db.end_session(parent, "compression")
+        db.create_session(child, source="cli", parent_session_id=parent)
+        db.append_message(child, role="assistant", content="...summary...")
+        migrate_goal(parent, child)
+
+        # 4. Resume of the parent redirects forward to the child with messages.
+        assert db.resolve_resume_session_id(parent) == child
+
+        # 5. The objective must still resolve for the resumed (child) session.
+        mgr = GoalManager(child)
+        assert mgr.has_goal() is True, "objective lost across compression rotation"
+        assert mgr.state is not None
+        assert mgr.state.goal == "finish the migration"
+
+    def test_migrate_goal_does_not_overwrite_existing_child_goal(self, hermes_home):
+        """Copy semantics must never clobber a goal the child already has."""
+        from hermes_cli.goals import GoalManager, migrate_goal
+
+        GoalManager("ovr-parent").set("parent goal")
+        GoalManager("ovr-child").set("child goal")
+
+        assert migrate_goal("ovr-parent", "ovr-child") is False
+        assert GoalManager("ovr-child").state.goal == "child goal"
+
+    def test_migrate_goal_noop_when_no_source_goal(self, hermes_home):
+        """No source goal → nothing copied, returns False, no crash."""
+        from hermes_cli.goals import GoalManager, migrate_goal
+
+        assert migrate_goal("noop-parent", "noop-child") is False
+        assert GoalManager("noop-child").has_goal() is False

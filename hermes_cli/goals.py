@@ -279,6 +279,38 @@ def clear_goal(session_id: str) -> None:
     save_goal(session_id, state)
 
 
+def migrate_goal(old_session_id: str, new_session_id: str) -> bool:
+    """Copy durable goal state from one session id to another.
+
+    Used at the compression session-rotation boundary: compression ends the
+    active session and forks a child (new ``session_id``), but the goal is
+    keyed ``goal:<session_id>`` and GoalManager does a flat lookup with no
+    lineage fallback — so without this copy the objective reads None on the
+    child (and on /resume, which redirects to the child).
+
+    Copy, not move: the parent row is left intact for audit. Never overwrites
+    a goal the child already has. Returns True iff a goal was copied. Never
+    raises — a migration failure must not abort the compression split.
+    """
+    if not old_session_id or not new_session_id or old_session_id == new_session_id:
+        return False
+    db = _get_session_db()
+    if db is None:
+        return False
+    try:
+        raw = db.get_meta(_meta_key(old_session_id))
+        if not raw:
+            return False
+        if db.get_meta(_meta_key(new_session_id)):
+            return False  # child already has a goal — don't clobber it
+        db.set_meta(_meta_key(new_session_id), raw)
+        return True
+    except Exception as exc:
+        logger.warning("GoalManager: goal migration %s -> %s failed: %s",
+                       old_session_id, new_session_id, exc)
+        return False
+
+
 # ──────────────────────────────────────────────────────────────────────
 # Judge
 # ──────────────────────────────────────────────────────────────────────

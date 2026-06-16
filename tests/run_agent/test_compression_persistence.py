@@ -198,3 +198,88 @@ class TestGatewayHistoryOffsetAfterSplit:
         assert len(new_messages) == 0, (
             "Expected 0 messages with stale offset=200 (demonstrates the bug)"
         )
+
+
+# ---------------------------------------------------------------------------
+# Part 3: Durable goal/objective survives the compression session rotation
+# ---------------------------------------------------------------------------
+
+def test_compression_rotation_migrates_goal(tmp_path, monkeypatch):
+    """compress_context must migrate the durable goal across session rotation.
+
+    Drives the real rotation path (summarizer stubbed so no model call fires).
+    Fails if agent/conversation_compression.py stops calling migrate_goal during
+    rotation: the spy records no call AND the goal no longer resolves under the
+    rotated (child) session id.
+    """
+    from pathlib import Path
+
+    import hermes_cli.goals as goals
+    from hermes_cli.goals import GoalManager
+    from hermes_state import SessionDB
+    from agent import conversation_compression
+
+    # Isolated HERMES_HOME so the agent's session rows and the goal store
+    # resolve to the same on-disk DB (as they do in production).
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    goals._DB_CACHE.clear()
+
+    db = SessionDB()
+    old_sid = "rotate-old"
+    db.create_session(session_id=old_sid, source="test")
+
+    with patch.dict(os.environ, {"OPENROUTER_API_KEY": "test-key"}):
+        from run_agent import AIAgent
+        agent = AIAgent(
+            api_key="test-key",
+            base_url="https://openrouter.ai/api/v1",
+            model="test/model",
+            quiet_mode=True,
+            session_db=db,
+            session_id=old_sid,
+            skip_context_files=True,
+            skip_memory=True,
+        )
+
+    # Standing goal on the pre-rotation session.
+    GoalManager(old_sid).set("survive the rotation")
+
+    # Reach the rotation block without any model work: feasibility marked
+    # done and the summariser stubbed to a usable (non-aborted) summary.
+    agent._compression_feasibility_checked = True
+    agent.context_compressor.compress = lambda *a, **k: [
+        {"role": "user", "content": "[CONTEXT COMPACTION] summary"}
+    ]
+    agent.context_compressor._last_compress_aborted = False
+    agent.context_compressor._last_summary_error = None
+    agent.context_compressor._last_aux_model_failure_model = None
+
+    # Spy on migrate_goal while still performing the real copy. The rotation
+    # block does a local ``from hermes_cli.goals import migrate_goal``, so
+    # patching the module attribute is picked up at call time.
+    real_migrate = goals.migrate_goal
+    calls = []
+
+    def _spy(old, new):
+        calls.append((old, new))
+        return real_migrate(old, new)
+
+    monkeypatch.setattr(goals, "migrate_goal", _spy)
+
+    messages = [
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": "yo"},
+    ]
+    conversation_compression.compress_context(agent, messages, "sys")
+
+    new_sid = agent.session_id
+    assert new_sid != old_sid, "session rotation did not occur"
+    assert calls == [(old_sid, new_sid)], (
+        f"compress_context did not call migrate_goal(old, new) during rotation: {calls}"
+    )
+    # Observable effect: the objective now resolves under the rotated id.
+    assert GoalManager(new_sid).state is not None
+    assert GoalManager(new_sid).state.goal == "survive the rotation"
